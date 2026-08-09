@@ -1,0 +1,26 @@
+services:
+  roomsd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      ROOMS_TRANSPORT: tcp
+      ROOMS_HOST: 0.0.0.0
+      ROOMS_PORT: "43170"
+      ROOMS_DB_PATH: /data/rooms.sqlite
+    ports:
+      - "127.0.0.1:43170:43170"
+    volumes:
+      - roomsd-data:/data
+    healthcheck:
+      test: ["CMD", "node", "/app/docker/healthcheck.mjs"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  roomsd-data:

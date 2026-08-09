@@ -1,0 +1,6 @@
+{
+  "canonicalSchema": "src/domain",
+  "generatedBindings": "src/generated",
+  "durableFormat": "sqlite",
+  "records": ["sessions", "channels", "memberships", "changes", "import_batches"]
+}

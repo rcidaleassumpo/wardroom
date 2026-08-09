@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a user-facing Wardroom capability that does not change wire semantics.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use the protocol design form instead when the proposal changes protobuf fields, authority, ordering, replay, or failure semantics.
+  - type: checkboxes
+    id: existing
+    attributes:
+      label: Existing issue
+      options:
+        - label: I searched the open and closed issues for this request.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or operator problem without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the observable result and how a user would know it works.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Product boundary
+      description: State which Wardroom-owned surface changes and which provider, workflow, or operating-system concerns stay outside it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds and why they are not enough.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance proof
+      description: Name the test, command, or runtime evidence that should prove the outcome.
+    validations:
+      required: true

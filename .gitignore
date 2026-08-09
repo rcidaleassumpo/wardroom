@@ -1,0 +1,7 @@
+.build/
+*.app/
+DerivedData/
+.worktrees/
+roomsd/release/
+roomsd/runtime-host-go/rooms-runtime-host
+PUBLIC_EXPORT_MANIFEST.json

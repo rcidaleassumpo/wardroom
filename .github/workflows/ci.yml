@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A fork pull request runs repository code. Keep the token read-only, never use
+# pull_request_target, never persist checkout credentials, and do not expose
+# signing or publishing secrets in this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  roomsd:
+    name: TypeScript daemon and CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    defaults:
+      run:
+        working-directory: roomsd
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  runtime-host-native:
+    name: Go runtime host (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: roomsd/runtime-host-go
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: roomsd/runtime-host-go/go.mod
+          cache: false
+      - run: go build ./...
+      - run: go test ./...
+      - run: go vet ./...
+
+  runtime-host-cross-build:
+    name: Go runtime host Darwin cross-build (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: roomsd/runtime-host-go
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: roomsd/runtime-host-go/go.mod
+          cache: false
+      - name: Cross-build the supported darwin-arm64 host
+        env:
+          CGO_ENABLED: '0'
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build -trimpath -o "${RUNNER_TEMP}/rooms-runtime-host-darwin-arm64" .
+
+  release-smoke:
+    name: Local-proof release build (macOS arm64)
+    runs-on: macos-14
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: roomsd
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # setup-node installs the official Node distribution. The release builder
+      # checks its NODE_SEA_FUSE marker before producing any artifact.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: roomsd/runtime-host-go/go.mod
+          cache: false
+      - run: npm ci --no-audit --no-fund
+      - name: Build an ad-hoc signed release without publishing it
+        env:
+          ROOMS_RELEASE_VERSION: 0.1.0-ci.${{ github.run_id }}.${{ github.run_attempt }}
+          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
+          ROOMS_SIGNING_MODE: LOCAL_PROOF_ONLY
+          ROOMS_SIGNING_IDENTITY: '-'
+        run: npm run build:release
+      - name: Run the self-contained CLI
+        env:
+          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
+        run: '"${ROOMS_RELEASE_OUT}/rooms" --help >/dev/null'
+      - name: Build npm and Homebrew distribution artifacts
+        env:
+          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
+          ROOMS_DISTRIBUTION_OUT: ${{ runner.temp }}/rooms-distributions
+        run: |
+          node scripts/package-distributions.mjs --release-dir "${ROOMS_RELEASE_OUT}" --output "${ROOMS_DISTRIBUTION_OUT}"
+          ruby -c "${ROOMS_DISTRIBUTION_OUT}/homebrew-tap/Formula/wardroom.rb"
+          npm_package="$(find "${ROOMS_DISTRIBUTION_OUT}" -maxdepth 1 -name 'wardroom-*.tgz' -print -quit)"
+          test -n "${npm_package}"
+          npm install --global --prefix "${RUNNER_TEMP}/rooms-npm-prefix" "${npm_package}"
+          ROOMS_STATE_DIR="${RUNNER_TEMP}/rooms-npm-state" ROOMS_INSTALL_ROOT="${RUNNER_TEMP}/rooms-npm-install" "${RUNNER_TEMP}/rooms-npm-prefix/bin/rooms" install
+          test -x "${RUNNER_TEMP}/rooms-npm-install/lib/rooms/current/roomsd"
+      - name: Run the published quickstart against an isolated service
+        env:
+          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
+          ROOMS_STATE_DIR: ${{ runner.temp }}/rooms-quickstart-state
+          ROOMS_INSTALL_ROOT: ${{ runner.temp }}/rooms-quickstart-install
+        run: |
+          set -euo pipefail
+          task_rooms="${ROOMS_INSTALL_ROOT}/bin/rooms"
+          task_default_plist="${HOME}/Library/LaunchAgents/local.rooms.roomsd.plist"
+          test ! -e "${task_default_plist}"
+          cleanup_quickstart() {
+            "${task_rooms}" service uninstall >/dev/null 2>&1 || true
+          }
+          trap cleanup_quickstart EXIT
+
+          "${ROOMS_RELEASE_OUT}/rooms" install --release-dir "${ROOMS_RELEASE_OUT}"
+          "${task_rooms}" setup
+          "${task_rooms}" provider discover
+          task_install_output="$("${task_rooms}" service install)"
+          printf '%s\n' "${task_install_output}" | grep -E '"label": "local\.rooms\.roomsd\.state-[0-9a-f]{16}"'
+          "${task_rooms}" channel create demo | grep -F '"id": "demo"'
+          "${task_rooms}" channel list | grep -F '"id": "demo"'
+          test ! -e "${task_default_plist}"
+
+          "${task_rooms}" service uninstall
+          trap - EXIT
+          test ! -e "${task_default_plist}"
+          if find "${HOME}/Library/LaunchAgents" -maxdepth 1 -name 'local.rooms.roomsd.state-*.plist' -print -quit | grep -q .; then
+            echo "isolated Rooms LaunchAgent plist remains after uninstall" >&2
+            exit 1
+          fi

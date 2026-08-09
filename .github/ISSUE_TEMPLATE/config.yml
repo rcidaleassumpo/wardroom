@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/rcidaleassumpo/wardroom/security
+    about: Use private vulnerability reporting. Do not put security details in a public issue.

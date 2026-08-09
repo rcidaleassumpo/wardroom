@@ -1,0 +1,88 @@
+name: Protocol design proposal
+description: Propose a versioned change to Wardroom's public `rooms` protocol.
+title: "[Protocol] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read PROTOCOL.md and roomsd/proto/rooms/v1/rooms.proto first. This form starts design discussion; it does not approve a protocol change.
+  - type: checkboxes
+    id: preparation
+    attributes:
+      label: Preparation
+      options:
+        - label: I searched existing issues and read the current protocol contract.
+          required: true
+        - label: I will preserve existing protobuf field numbers and reserve removed fields.
+          required: true
+  - type: textarea
+    id: limitation
+    attributes:
+      label: Current limitation
+      description: State the missing semantic or race that existing operations cannot express safely.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed wire contract
+      description: List requests, responses, fields, types, bounds, and the durable state change.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority and authorization
+      description: Name the authority that commits the result, the authenticated actor, and every authorization check.
+    validations:
+      required: true
+  - type: textarea
+    id: concurrency
+    attributes:
+      label: Concurrency and idempotency
+      description: Define competing requests, winner and loser results, retry keys, compare-and-set rules, and restart behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: ordering
+    attributes:
+      label: Ordering, cursors, and replay
+      description: Define event order, cursor effects, duplicate handling, and replay behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: failures
+    attributes:
+      label: Failure semantics
+      description: List stable errors, partial outcomes, timeouts, stale versions, and unknown-field behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Versioning and migration
+      description: Explain backward compatibility, protocol-version handling, rollout order, and stored-state migration.
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy
+      description: Cover trust boundaries, abuse limits, sensitive fields, logging, and data retention.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Explain rejected designs and why clients cannot safely compose the current API instead.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test plan
+      description: Include concurrent, retry, replay, authorization, failure, compatibility, and restart cases.
+    validations:
+      required: true

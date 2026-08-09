@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish npm and GitHub release
+    runs-on: macos-14
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: roomsd
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: roomsd/runtime-host-go/go.mod
+          cache: false
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - name: Build complete release
+        env:
+          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
+          ROOMS_SIGNING_MODE: LOCAL_PROOF_ONLY
+          ROOMS_SIGNING_IDENTITY: '-'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          ROOMS_RELEASE_VERSION="${version}" npm run build:release
+      - name: Build and inspect distribution artifacts
+        env:
+          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
+          ROOMS_DISTRIBUTION_OUT: ${{ runner.temp }}/rooms-distributions
+        run: |
+          node scripts/package-distributions.mjs --release-dir "${ROOMS_RELEASE_OUT}" --output "${ROOMS_DISTRIBUTION_OUT}"
+          ruby -c "${ROOMS_DISTRIBUTION_OUT}/homebrew-tap/Formula/wardroom.rb"
+          npm_package="$(find "${ROOMS_DISTRIBUTION_OUT}" -maxdepth 1 -name 'wardroom-*.tgz' -print -quit)"
+          npm install --global --prefix "${RUNNER_TEMP}/rooms-npm-prefix" "${npm_package}"
+          ROOMS_STATE_DIR="${RUNNER_TEMP}/rooms-npm-state" ROOMS_INSTALL_ROOT="${RUNNER_TEMP}/rooms-npm-install" "${RUNNER_TEMP}/rooms-npm-prefix/bin/rooms" install
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROOMS_DISTRIBUTION_OUT: ${{ runner.temp }}/rooms-distributions
+        working-directory: .
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "${ROOMS_DISTRIBUTION_OUT}/wardroom-"*"-darwin-arm64.tar.gz" \
+            "${ROOMS_DISTRIBUTION_OUT}/wardroom-"*".tgz" \
+            "${ROOMS_DISTRIBUTION_OUT}/distribution-manifest.json" \
+            "${ROOMS_DISTRIBUTION_OUT}/homebrew-tap/Formula/wardroom.rb" \
+            --verify-tag --draft --generate-notes --title "Wardroom ${GITHUB_REF_NAME#v}"
+      - name: Publish npm package with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          ROOMS_DISTRIBUTION_OUT: ${{ runner.temp }}/rooms-distributions
+        run: |
+          npm_package="$(find "${ROOMS_DISTRIBUTION_OUT}" -maxdepth 1 -name 'wardroom-*.tgz' -print -quit)"
+          npm publish "${npm_package}" --access public --provenance
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: .
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
