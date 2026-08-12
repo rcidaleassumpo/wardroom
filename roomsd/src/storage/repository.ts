@@ -1,8 +1,12 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { existsSync } from "node:fs";
-import { CursorCodec, RoomsCommandError, type CanonicalImportEvent, type Change, type Channel, type Membership, type MutationReceipt, type Session, type SessionRole, type Snapshot } from "../domain/contracts.js";
+import { CursorCodec, RoomsCommandError, type CanonicalImportEvent, type CanonicalMessageCommitInput, type Change, type Channel, type ChannelBroadcastPolicy, type Membership, type MutationReceipt, type Session, type SessionDeliveryMode, type SessionRole, type Snapshot, type ThreadLifecycle } from "../domain/contracts.js";
+import { loadProviderTranscriptLines, resolveProviderTurn, type ProviderTurnPhase } from "../runtime/provider-turn.js";
+import { providerSessionUsage, type ProviderUsage } from "../runtime/provider-usage.js";
 import { migrate, requireCurrentSchema, type SchemaPolicy } from "./migrations.js";
-export type { CanonicalImportEvent, Change, Channel, Membership, MutationReceipt, Session, SessionRole, Snapshot } from "../domain/contracts.js";
+import { instrumentDatabase, withQueryOperation } from "./query-telemetry.js";
+import { UsageHistoryRepository, type UsageSeries } from "./usage-history.js";
+export type { CanonicalImportEvent, Change, Channel, ChannelBroadcastPolicy, Membership, MutationReceipt, Session, SessionDeliveryMode, SessionRole, Snapshot, ThreadLifecycle } from "../domain/contracts.js";
 
 export type FederationChannelAdmission = Readonly<{
   channelId: string;
@@ -25,8 +29,68 @@ export type SessionInspection = Readonly<{
     channelId: string | null;
     adapterKind: string | null;
     providerThreadId: string | null;
+    /**
+     * Why providerThreadId looks the way it does. A bare null cannot distinguish
+     * a healthy provider whose transcript has not appeared yet from one whose
+     * identity will never arrive, so consumers polling it to decide whether an
+     * agent started read both as "never attached".
+     */
+    providerThreadIdState: "attached" | "pending" | "unavailable" | "unsupported";
+    providerThreadIdReason: string | null;
     endedAt: string | null;
+    /** Provider lifecycle phase derived from delivery events + provider transcript. */
+    providerTurn: Readonly<{
+      phase: ProviderTurnPhase | null;
+      reason: string;
+      updatedAt: string | null;
+    }>;
+    usage: ProviderUsage;
   }> | null;
+}>;
+
+export type ChannelStateRuntime = Readonly<{
+  runtimeId: string;
+  homeAuthorityId: string;
+  generation: number;
+  state: string;
+  machineId: string;
+  adapterKind: string | null;
+  providerThreadId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  endedAt: string | null;
+}>;
+
+export type ChannelStateMember = Readonly<{
+  sessionId: string;
+  displayName: string | null;
+  role: SessionRole | null;
+  joinedAt: string;
+  sessionEndedAt: string | null;
+  runtime: ChannelStateRuntime | null;
+}>;
+
+export type ChannelStateSnapshot = Readonly<{
+  channelId: string;
+  revision: string;
+  lifecycleState: Channel["lifecycleState"];
+  members: ChannelStateMember[];
+}>;
+
+export type ChannelStateSnapshots = Readonly<{
+  snapshots: Record<string, ChannelStateSnapshot>;
+  errors: Record<string, { code: "channelNotFound" }>;
+}>;
+
+export type ChannelControlPage = Readonly<{
+  events: unknown[];
+  cursor: string;
+  hasMore: boolean;
+}>;
+
+export type ChannelControlPages = Readonly<{
+  controls: Record<string, ChannelControlPage>;
+  errors: Record<string, { code: "channelNotFound" | "controlReaderNotMember" | "invalidCursor" }>;
 }>;
 
 export class RoomsStoreError extends RoomsCommandError { constructor(code: string, message = code) { super(code, message); this.name = "RoomsStoreError"; } }
@@ -35,6 +99,13 @@ type Row = Record<string, unknown>;
 const now = () => new Date().toISOString();
 const asString = (value: unknown): string => String(value);
 const iso = (value: number | string): string => typeof value === "number" ? new Date(value).toISOString() : value;
+function replyEventId(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 512) {
+    throw new RoomsStoreError("invalidReplyToEventId", `${field} must be a non-empty Rooms event id of at most 512 bytes`);
+  }
+  return value;
+}
 function importedMessage(value: Record<string, any>): Record<string, any> {
   const target = value.target?.kind === "directToSession"
     ? { kind: "direct", sessionId: value.target.sessionID }
@@ -46,6 +117,7 @@ function importedMessage(value: Record<string, any>): Record<string, any> {
 
 export class RoomsRepository {
   readonly db: DatabaseSync;
+  readonly usageHistory: UsageHistoryRepository;
   private readonly changeListeners = new Set<(change: Change) => void>();
   private importActive = false;
   private transactionDepth = 0;
@@ -53,18 +125,24 @@ export class RoomsRepository {
   private importExistingSessions = new Set<string>();
   private importExistingMemberships = new Set<string>();
 
-  constructor(filePath = ":memory:", options: { schemaPolicy?: SchemaPolicy; schemaActor?: string } = {}) {
+  constructor(filePath = ":memory:", options: { schemaPolicy?: SchemaPolicy; schemaActor?: string; usageHistory?: { now?: () => Date; retentionMs?: number; minSampleIntervalMs?: number }; providerUsage?: typeof providerSessionUsage } = {}) {
     const schemaPolicy = options.schemaPolicy ?? "migrate";
     if (schemaPolicy === "require-current" && filePath !== ":memory:" && !existsSync(filePath)) {
       throw new Error(`Rooms canonical store is missing: ${filePath}; run \`rooms setup\``);
     }
-    this.db = new DatabaseSync(filePath);
+    const rawDatabase = new DatabaseSync(filePath);
+    const database = instrumentDatabase(rawDatabase);
     try {
-      if (schemaPolicy === "require-current") requireCurrentSchema(this.db, options.schemaActor);
-      this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
-      if (schemaPolicy === "migrate") migrate(this.db);
-    } catch (error) { this.db.close(); throw error; }
+      if (schemaPolicy === "require-current") requireCurrentSchema(database, options.schemaActor);
+      database.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
+      if (schemaPolicy === "migrate") migrate(database);
+      this.db = database;
+      this.usageHistory = new UsageHistoryRepository(database, options.usageHistory);
+      this.providerUsage = options.providerUsage ?? providerSessionUsage;
+    } catch (error) { rawDatabase.close(); throw error; }
   }
+
+  private readonly providerUsage: typeof providerSessionUsage;
 
   pragma(name: "journal_mode" | "foreign_keys" | "busy_timeout"): string | number {
     const row = this.db.prepare(`PRAGMA ${name}`).get() as Row;
@@ -86,26 +164,274 @@ export class RoomsRepository {
     const row = this.one(`SELECT r.runtime_id, r.home_authority_id, r.generation, r.state,
         r.machine_id, r.provider_thread_id, r.ended_at, b.channel_id, b.adapter_kind
       FROM runtimes r
-      LEFT JOIN runtime_bindings b ON b.runtime_id=r.runtime_id
+      LEFT JOIN runtime_bindings b ON b.runtime_id=r.runtime_id AND b.unbound_at IS NULL
       WHERE r.session_id=?
       ORDER BY r.generation DESC, r.created_at DESC,
         CASE WHEN b.unbound_at IS NULL THEN 0 ELSE 1 END, b.bound_at DESC
       LIMIT 1`, id);
+    if (!row) return { session: current, memberships, runtime: null };
+    const providerThreadId = row.provider_thread_id == null ? current.providerThreadId : asString(row.provider_thread_id);
+    const adapterKind = row.adapter_kind == null ? null : asString(row.adapter_kind);
+    const alive = row.ended_at == null && ["creating", "running", "recovering"].includes(asString(row.state));
+    const identity = this.providerIdentityState({
+      providerThreadId,
+      runtimeId: asString(row.runtime_id),
+      generation: Number(row.generation),
+      adapterKind,
+      alive,
+    });
+    const lastDeliver = this.one(
+      `SELECT occurred_at FROM runtime_events
+       WHERE runtime_id=? AND generation=? AND kind='deliverMessageAccepted'
+       ORDER BY event_seq DESC LIMIT 1`,
+      asString(row.runtime_id),
+      Number(row.generation),
+    );
+    const lastDeliverAt = lastDeliver ? asString(lastDeliver.occurred_at) : null;
+    const providerTurn = resolveProviderTurn({
+      alive,
+      adapterKind,
+      lastDeliverAt,
+      transcriptLines: loadProviderTranscriptLines(adapterKind, providerThreadId, undefined, id),
+    });
+    const usage = { status: "unavailable" as const, inputTokens: null, cachedInputTokens: null, outputTokens: null, totalTokens: null, updatedAt: null, reason: "usage-history-query-required" };
     return {
       session: current,
       memberships,
-      runtime: row ? {
+      runtime: {
         runtimeId: asString(row.runtime_id),
         homeAuthorityId: asString(row.home_authority_id),
         generation: Number(row.generation),
         state: asString(row.state),
         machineId: asString(row.machine_id),
         channelId: row.channel_id == null ? null : asString(row.channel_id),
-        adapterKind: row.adapter_kind == null ? null : asString(row.adapter_kind),
-        providerThreadId: row.provider_thread_id == null ? current.providerThreadId : asString(row.provider_thread_id),
+        adapterKind,
+        providerThreadId,
+        providerThreadIdState: identity.state,
+        providerThreadIdReason: identity.reason,
         endedAt: row.ended_at == null ? null : asString(row.ended_at),
-      } : null,
+        providerTurn: {
+          phase: providerTurn.phase,
+          reason: providerTurn.reason,
+          updatedAt: providerTurn.updatedAt,
+        },
+        usage,
+      },
     };
+  }
+
+  usageSeries(scope: "session" | "channel", id: string, window: string, collect = false): UsageSeries {
+    if (!collect) return this.usageHistory.privacySeries(scope, id, window);
+    const rows = scope === "session"
+      ? this.rows(`SELECT r.session_id, r.runtime_id, r.generation, b.channel_id, b.adapter_kind,
+          COALESCE(r.provider_thread_id, s.provider_thread_id) AS provider_thread_id
+        FROM runtimes r JOIN sessions s ON s.id=r.session_id
+        JOIN runtime_bindings b ON b.runtime_id=r.runtime_id AND b.unbound_at IS NULL
+        WHERE r.session_id=? ORDER BY r.generation DESC, r.created_at DESC LIMIT 1`, id)
+      : this.rows(`WITH latest AS (
+          SELECT r.session_id, r.runtime_id, r.generation, b.channel_id, b.adapter_kind,
+            COALESCE(r.provider_thread_id, s.provider_thread_id) AS provider_thread_id,
+            ROW_NUMBER() OVER (PARTITION BY r.session_id ORDER BY r.generation DESC, r.created_at DESC) rank
+          FROM runtimes r JOIN sessions s ON s.id=r.session_id
+          JOIN runtime_bindings b ON b.runtime_id=r.runtime_id AND b.unbound_at IS NULL
+          WHERE b.channel_id=?) SELECT * FROM latest WHERE rank=1`, id);
+    for (const row of rows) this.sampleUsage({ sessionId: asString(row.session_id), runtimeId: asString(row.runtime_id), generation: Number(row.generation), channelId: row.channel_id == null ? null : asString(row.channel_id), adapterKind: row.adapter_kind == null ? null : asString(row.adapter_kind), providerThreadId: row.provider_thread_id == null ? null : asString(row.provider_thread_id) });
+    return this.usageHistory.query(scope, id, window);
+  }
+
+  private sampleUsage(input: { sessionId: string; runtimeId: string; generation: number; channelId: string | null; adapterKind: string | null; providerThreadId: string | null }): ProviderUsage {
+    const usage = this.providerUsage(input.adapterKind, input.providerThreadId);
+    this.usageHistory.record({ ...input, adapterKind: input.adapterKind ?? "unknown", usage });
+    return usage;
+  }
+
+  /**
+   * Returns canonical channel membership and each member's latest runtime with
+   * one set-based SQLite statement, regardless of channel or member count.
+   */
+  channelStateSnapshots(channelIds: readonly string[]): ChannelStateSnapshots {
+    const ids = [...new Set(channelIds.map((value) => value.trim()).filter(Boolean))];
+    if (ids.length === 0) return { snapshots: {}, errors: {} };
+    if (ids.length > 100) throw new RoomsStoreError("snapshotBatchTooLarge", "channel snapshot batches are limited to 100 channels");
+    return withQueryOperation({ operation: "repository.channelStateSnapshots" }, () => {
+      const requested = ids.map((_, index) => `(?, ${index})`).join(", ");
+      const rows = this.rows(`WITH requested(channel_id, ordinal) AS (VALUES ${requested}),
+        active_members AS (
+          SELECT m.channel_id, m.session_id, m.joined_at, m.session_ended_at,
+            COALESCE(m.role, s.role) AS role, s.display_name
+          FROM memberships m
+          JOIN sessions s ON s.id=m.session_id
+          JOIN requested q ON q.channel_id=m.channel_id
+          WHERE m.left_at IS NULL AND m.session_ended_at IS NULL
+        ),
+        latest_runtimes AS (
+          SELECT b.channel_id, b.adapter_kind, r.*,
+            ROW_NUMBER() OVER (PARTITION BY b.channel_id, r.session_id ORDER BY r.generation DESC, r.created_at DESC, r.runtime_id DESC) AS rank
+          FROM runtimes r
+          JOIN runtime_bindings b ON b.runtime_id=r.runtime_id AND b.unbound_at IS NULL
+          JOIN requested q ON q.channel_id=b.channel_id
+        )
+        SELECT q.channel_id AS requested_channel_id, q.ordinal,
+          c.id AS channel_id, c.lifecycle_state,
+          COALESCE((SELECT MAX(cursor) FROM changes WHERE channel_id=q.channel_id), 0) AS change_revision,
+          COALESCE((SELECT MAX(r2.updated_at) FROM runtimes r2
+            JOIN runtime_bindings b2 ON b2.runtime_id=r2.runtime_id
+            WHERE b2.channel_id=q.channel_id), '') AS runtime_revision,
+          m.session_id, m.display_name, m.role, m.joined_at, m.session_ended_at,
+          r.runtime_id, r.home_authority_id, r.generation, r.state, r.machine_id,
+          r.provider_thread_id, r.created_at, r.updated_at, r.ended_at, r.adapter_kind
+        FROM requested q
+        LEFT JOIN channels c ON c.id=q.channel_id
+        LEFT JOIN active_members m ON m.channel_id=q.channel_id
+        LEFT JOIN latest_runtimes r ON r.channel_id=q.channel_id AND r.session_id=m.session_id AND r.rank=1
+        ORDER BY q.ordinal, m.joined_at, m.session_id`, ...ids);
+      // Channel ids are opaque product data. A real store can contain names
+      // such as "__proto__", so result maps must not inherit object keys.
+      const snapshots = Object.create(null) as Record<string, ChannelStateSnapshot>;
+      const errors = Object.create(null) as Record<string, { code: "channelNotFound" }>;
+      for (const row of rows) {
+        const requestedChannelId = asString(row.requested_channel_id);
+        if (row.channel_id == null) { errors[requestedChannelId] = { code: "channelNotFound" }; continue; }
+        const snapshot = snapshots[requestedChannelId] ??= {
+          channelId: requestedChannelId,
+          revision: `${asString(row.change_revision)}:${asString(row.runtime_revision)}`,
+          lifecycleState: asString(row.lifecycle_state) as Channel["lifecycleState"],
+          members: [],
+        };
+        if (row.session_id == null) continue;
+        snapshot.members.push({
+          sessionId: asString(row.session_id),
+          displayName: row.display_name == null ? null : asString(row.display_name),
+          role: row.role == null ? null : row.role as SessionRole,
+          joinedAt: asString(row.joined_at),
+          sessionEndedAt: row.session_ended_at == null ? null : asString(row.session_ended_at),
+          runtime: row.runtime_id == null ? null : {
+            runtimeId: asString(row.runtime_id),
+            homeAuthorityId: asString(row.home_authority_id),
+            generation: Number(row.generation),
+            state: asString(row.state),
+            machineId: asString(row.machine_id),
+            adapterKind: row.adapter_kind == null ? null : asString(row.adapter_kind),
+            providerThreadId: row.provider_thread_id == null ? null : asString(row.provider_thread_id),
+            createdAt: asString(row.created_at),
+            updatedAt: asString(row.updated_at),
+            endedAt: row.ended_at == null ? null : asString(row.ended_at),
+          },
+        });
+      }
+      return { snapshots, errors };
+    });
+  }
+
+  /**
+   * Returns private control pages for many channels with one set-based query.
+   * The caller supplies an independent durable cursor for each channel.
+   */
+  channelControlPages(
+    requests: readonly { channelId: string; afterCursor?: string }[],
+    sessionId: string,
+    limit = 100,
+  ): ChannelControlPages {
+    const unique = new Map<string, string>();
+    for (const request of requests) {
+      const channelId = String(request.channelId || "").trim();
+      if (channelId && !unique.has(channelId)) unique.set(channelId, String(request.afterCursor ?? "0"));
+    }
+    if (unique.size === 0) return { controls: {}, errors: {} };
+    if (unique.size > 100) throw new RoomsStoreError("controlBatchTooLarge", "channel control batches are limited to 100 channels");
+    if (!sessionId.trim()) throw new RoomsStoreError("invalidSession", "control reader session is required");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new RoomsStoreError("invalidLimit");
+
+    const controls = Object.create(null) as Record<string, ChannelControlPage>;
+    const errors = Object.create(null) as ChannelControlPages["errors"];
+    const valid: { channelId: string; cursor: string; decoded: bigint }[] = [];
+    for (const [channelId, cursor] of unique) {
+      try {
+        const decoded = CursorCodec.decode(cursor);
+        valid.push({ channelId, cursor, decoded });
+        controls[channelId] = { events: [], cursor, hasMore: false };
+      } catch { errors[channelId] = { code: "invalidCursor" }; }
+    }
+    if (valid.length === 0) return { controls, errors };
+
+    return withQueryOperation({ operation: "repository.channelControlPages" }, () => {
+      const requested = valid.map((_, index) => `(?, ?, ${index})`).join(", ");
+      const parameters = valid.flatMap((request) => [request.channelId, request.decoded] as SQLInputValue[]);
+      const rows = this.cursorRows(`WITH requested(channel_id, after_cursor, ordinal) AS (VALUES ${requested}),
+        ranked_controls AS (
+          SELECT q.channel_id AS requested_channel_id, ch.cursor, ch.payload,
+            ROW_NUMBER() OVER (PARTITION BY q.channel_id ORDER BY ch.cursor) AS event_rank,
+            COUNT(*) OVER (PARTITION BY q.channel_id) AS event_count
+          FROM requested q
+          JOIN changes ch ON ch.channel_id=q.channel_id
+            AND ch.cursor>q.after_cursor AND ch.kind='control.committed'
+        )
+        SELECT q.channel_id AS requested_channel_id, c.id AS existing_channel_id,
+          m.session_id AS member_session_id, rc.cursor, rc.payload, rc.event_count
+        FROM requested q
+        LEFT JOIN channels c ON c.id=q.channel_id
+        LEFT JOIN memberships m ON m.channel_id=q.channel_id AND m.session_id=?
+          AND m.left_at IS NULL AND m.session_ended_at IS NULL
+        LEFT JOIN ranked_controls rc ON rc.requested_channel_id=q.channel_id AND rc.event_rank<=?
+        ORDER BY q.ordinal, rc.cursor`, ...parameters, sessionId, limit);
+
+      for (const row of rows) {
+        const channelId = asString(row.requested_channel_id);
+        if (row.existing_channel_id == null) {
+          delete controls[channelId];
+          errors[channelId] = { code: "channelNotFound" };
+          continue;
+        }
+        if (row.member_session_id == null) {
+          delete controls[channelId];
+          errors[channelId] = { code: "controlReaderNotMember" };
+          continue;
+        }
+        if (row.payload == null) continue;
+        const prior = controls[channelId];
+        const cursor = CursorCodec.encode(row.cursor as bigint);
+        controls[channelId] = {
+          events: [...prior.events, JSON.parse(asString(row.payload))],
+          cursor,
+          hasMore: Number(row.event_count) > limit,
+        };
+      }
+      return { controls, errors };
+    });
+  }
+
+  recordRuntimeLifecycle(input: Readonly<{
+    channelId: string;
+    sessionId: string;
+    runtimeId: string;
+    generation: number;
+    state: string;
+    endedAt: string | null;
+  }>): MutationReceipt {
+    return this.write(() => {
+      const role = this.one(`SELECT role FROM memberships
+        WHERE channel_id=? AND session_id=? AND left_at IS NULL AND session_ended_at IS NULL
+        ORDER BY joined_at DESC LIMIT 1`, input.channelId, input.sessionId)?.role ?? null;
+      return this.appendChange("runtime.lifecycle", input.channelId, { ...input, role });
+    });
+  }
+
+  /** Only providers that persist a transcript can ever report a native thread id. */
+  private providerIdentityState(input: { providerThreadId: string | null; runtimeId: string; generation: number; adapterKind: string | null; alive: boolean }): { state: "attached" | "pending" | "unavailable" | "unsupported"; reason: string | null } {
+    if (input.providerThreadId) return { state: "attached", reason: null };
+    // Claude/Codex/Grok each persist a native session transcript. Grok's id is
+    // bound at launch into provider_thread_id so inspect never scans globally.
+    const discoverable = input.adapterKind === "claude" || input.adapterKind === "codex" || input.adapterKind === "grok";
+    if (input.adapterKind !== null && !discoverable) return { state: "unsupported", reason: `${input.adapterKind} does not persist a native transcript` };
+    // Launch records why it gave up, so a stalled discovery is reported as a
+    // dead end rather than as a poll the caller should keep waiting on.
+    const gap = this.one(`SELECT outcome FROM runtime_events
+      WHERE runtime_id=? AND generation=? AND kind='error' AND outcome LIKE 'providerThreadId%'
+      ORDER BY event_seq DESC LIMIT 1`, input.runtimeId, input.generation);
+    if (gap) return { state: "unavailable", reason: asString(gap.outcome) };
+    return input.alive
+      ? { state: "pending", reason: "provider has not written its transcript yet" }
+      : { state: "unavailable", reason: "runtime ended before its provider identity was captured" };
   }
 
   activeRuntimeSessionIdsForProviderThread(providerThreadId: string): string[] {
@@ -175,7 +501,14 @@ export class RoomsRepository {
         case "membership": { const value = record.membership; this.insertImportedMembership(value); break; }
         case "membershipEnded": { const value = record.membershipEnd; this.endImportedMembership(value.channelID, value.sessionID, iso(value.endedAt)); break; }
         case "sessionEnded": { const value = record.sessionEnd; const ended = iso(value.endedAt); if (!this.importExistingSessions.has(value.sessionID)) { this.db.prepare("UPDATE sessions SET ended_at=? WHERE id=?").run(ended, value.sessionID); this.db.prepare("UPDATE memberships SET session_ended_at=? WHERE session_id=? AND left_at IS NULL AND session_ended_at IS NULL").run(ended, value.sessionID); } break; }
-        case "message": { const value = record.event; this.appendImportedChange("message.sent", value.channelID ?? null, importedMessage(value), event); break; }
+        case "message": {
+          const value = record.event;
+          const channelId = value.channelID ?? null;
+          const message = importedMessage(value);
+          const reply = this.resolveReplyMetadata({ channelId, replyToEventId: value.replyToEventId ?? value.replyToEventID, correlation: message.correlation });
+          this.appendImportedChange("message.sent", channelId, { ...message, ...reply }, event);
+          break;
+        }
         case "workerJoin": { const value = record.workerMembership; this.insertImportedMembership(value); break; }
         case "workerTerminal": { const value = record.terminalMembershipEnd; this.endImportedMembership(value.channelID, value.sessionID, iso(value.endedAt)); break; }
         case "channelClosed": { const value = record.channel; if (!this.importExistingChannels.has(value.id)) this.db.prepare("UPDATE channels SET lifecycle_state='closed', closed_at=? WHERE id=?").run(value.closedAt == null ? iso(event.occurredAt) : iso(value.closedAt), value.id); break; }
@@ -214,12 +547,13 @@ export class RoomsRepository {
     if (this.importActive) { this.db.exec("ROLLBACK"); this.importActive = false; }
   }
 
-  insertSession(input: { id: string; displayName?: string | null; role?: SessionRole | null; externalId?: string | null }): MutationReceipt {
+  insertSession(input: { id: string; displayName?: string | null; role?: SessionRole | null; externalId?: string | null; deliveryMode?: SessionDeliveryMode | null }): MutationReceipt {
     return this.write(() => {
       if (this.one("SELECT id FROM sessions WHERE id = ?", input.id)) throw new RoomsStoreError("sessionAlreadyExists");
       const registeredAt = now();
-      this.db.prepare("INSERT INTO sessions(id, registered_at, display_name, role, external_id) VALUES (?, ?, ?, ?, ?)").run(input.id, registeredAt, input.displayName ?? null, input.role ?? null, input.externalId ?? null);
-      return this.appendChange("session.registered", null, { id: input.id, registeredAt, displayName: input.displayName ?? null, role: input.role ?? null, externalId: input.externalId ?? null });
+      const deliveryMode = input.deliveryMode ?? "runtime";
+      this.db.prepare("INSERT INTO sessions(id, registered_at, display_name, role, external_id, delivery_mode) VALUES (?, ?, ?, ?, ?, ?)").run(input.id, registeredAt, input.displayName ?? null, input.role ?? null, input.externalId ?? null, deliveryMode);
+      return this.appendChange("session.registered", null, { id: input.id, registeredAt, displayName: input.displayName ?? null, role: input.role ?? null, externalId: input.externalId ?? null, deliveryMode });
     });
   }
 
@@ -228,16 +562,20 @@ export class RoomsRepository {
     return this.rows("SELECT id FROM sessions WHERE external_id = ? AND ended_at IS NULL", externalId).map(row => asString(row.id));
   }
 
-  registerSession(channelId: string, sessionId: string, role: SessionRole, externalId: string | null = null): { session: Session; membership: Membership; idempotent: boolean } {
+  registerSession(channelId: string, sessionId: string, role: SessionRole, externalId: string | null = null, deliveryMode: SessionDeliveryMode | null = null): { session: Session; membership: Membership; idempotent: boolean } {
     return this.command(() => {
       if (!this.currentChannel(channelId)) throw new RoomsStoreError("channelNotFound");
       const existing = this.currentSession(sessionId);
-      const sessionReceipt = existing ? null : this.insertSession({ id: sessionId, role, externalId });
+      const sessionReceipt = existing ? null : this.insertSession({ id: sessionId, role, externalId, deliveryMode });
       // Binding an existing mailbox to a caller is idempotent, but never silently reassigns it.
       if (existing && externalId) {
         const current = this.one("SELECT external_id FROM sessions WHERE id = ?", sessionId)?.external_id as string | null;
         if (current && current !== externalId) throw new RoomsStoreError("externalIdAlreadyBound");
         if (!current) this.db.prepare("UPDATE sessions SET external_id = ? WHERE id = ?").run(externalId, sessionId);
+      }
+      if (existing && deliveryMode && existing.deliveryMode !== deliveryMode) {
+        this.db.prepare("UPDATE sessions SET delivery_mode = ? WHERE id = ?").run(deliveryMode, sessionId);
+        this.appendChange("session.delivery.updated", null, { id: sessionId, deliveryMode });
       }
       if (!this.isActiveMember(channelId, sessionId)) this.insertMembership(channelId, sessionId, role);
       return { session: this.currentSession(sessionId)!, membership: this.membershipsFor(channelId, sessionId), idempotent: Boolean(existing) };
@@ -269,21 +607,23 @@ export class RoomsRepository {
 
   leaveMembership(channelId: string, sessionId: string): MutationReceipt {
     return this.write(() => {
-      const joined = this.one("SELECT joined_at FROM memberships WHERE channel_id=? AND session_id=? AND left_at IS NULL AND session_ended_at IS NULL ORDER BY joined_at DESC LIMIT 1", channelId, sessionId);
+      const joined = this.one("SELECT joined_at, role FROM memberships WHERE channel_id=? AND session_id=? AND left_at IS NULL AND session_ended_at IS NULL ORDER BY joined_at DESC LIMIT 1", channelId, sessionId);
       if (!joined) throw new RoomsStoreError("notMember");
       const leftAt = now();
       this.db.prepare("UPDATE memberships SET left_at=? WHERE channel_id=? AND session_id=? AND joined_at=?").run(leftAt, channelId, sessionId, String(joined.joined_at));
-      return this.appendChange("membership.left", channelId, { channelId, sessionId, leftAt });
+      return this.appendChange("membership.left", channelId, { channelId, sessionId, leftAt, role: joined.role ?? null });
     });
   }
 
   markSessionEnded(sessionId: string): MutationReceipt {
     return this.write(() => {
       if (!this.one("SELECT id FROM sessions WHERE id = ? AND ended_at IS NULL", sessionId)) throw new RoomsStoreError("unknownSession");
+      const memberships = this.rows("SELECT channel_id, role FROM memberships WHERE session_id=? AND left_at IS NULL AND session_ended_at IS NULL ORDER BY channel_id", sessionId)
+        .map((row) => ({ channelId: asString(row.channel_id), role: row.role ?? null }));
       const endedAt = now();
       this.db.prepare("UPDATE sessions SET ended_at = ? WHERE id = ?").run(endedAt, sessionId);
       this.db.prepare("UPDATE memberships SET session_ended_at = ? WHERE session_id = ? AND left_at IS NULL AND session_ended_at IS NULL").run(endedAt, sessionId);
-      return this.appendChange("session.ended", null, { sessionId, endedAt });
+      return this.appendChange("session.ended", null, { sessionId, endedAt, memberships });
     });
   }
 
@@ -299,6 +639,17 @@ export class RoomsRepository {
     });
   }
 
+  reopenChannel(channelId: string): MutationReceipt {
+    return this.write(() => {
+      const channel = this.one("SELECT id, lifecycle_state FROM channels WHERE id = ?", channelId);
+      if (!channel) throw new RoomsStoreError("unknownChannel");
+      if (channel.lifecycle_state === "active") return { changes: [], cursor: this.latestCursor(), didAppend: false };
+      const reopenedAt = now();
+      this.db.prepare("UPDATE channels SET lifecycle_state='active', closed_at=NULL WHERE id=?").run(channelId);
+      return this.appendChange("channel.reopened", channelId, { id: channelId, reopenedAt });
+    });
+  }
+
   updateChannelLabel(channelId: string, label: string | null): MutationReceipt {
     return this.write(() => {
       if (!this.one("SELECT id FROM channels WHERE id = ?", channelId)) throw new RoomsStoreError("unknownChannel");
@@ -309,25 +660,147 @@ export class RoomsRepository {
     });
   }
 
-  commitMessage(input: { channelId: string | null; senderSessionId: string; body: string; target: any; correlation?: any; deliveryStatuses?: Record<string, "delivered" | "queued" | "undeliverable"> }): MutationReceipt & { event: unknown; wasDeduplicated?: boolean } {
+  updateChannelBroadcastPolicy(channelId: string, policy: ChannelBroadcastPolicy): MutationReceipt {
     return this.write(() => {
-      const recipientSessionId = input.target?.sessionId ?? input.target?.sessionID;
-      if (input.target?.kind === "direct" || input.target?.kind === "directToSession") {
+      if (!this.one("SELECT id FROM channels WHERE id = ?", channelId)) throw new RoomsStoreError("unknownChannel");
+      const current = (this.one("SELECT broadcast_policy FROM channels WHERE id = ?", channelId)?.broadcast_policy as ChannelBroadcastPolicy | null) ?? "all";
+      if (current === policy) return { changes: [], cursor: this.latestCursor(), didAppend: false };
+      this.db.prepare("UPDATE channels SET broadcast_policy=? WHERE id=?").run(policy, channelId);
+      return this.appendChange("channel.broadcast-policy.updated", channelId, { id: channelId, broadcastPolicy: policy });
+    });
+  }
+
+  commitMessage(input: CanonicalMessageCommitInput): MutationReceipt & { event: unknown; wasDeduplicated?: boolean } {
+    return this.write(() => {
+      const target = input.target as any;
+      const recipientSessionId = target?.sessionId ?? target?.sessionID;
+      if (target?.kind === "direct" || target?.kind === "directToSession") {
         if (!recipientSessionId || !this.currentSession(recipientSessionId)) throw new RoomsStoreError("unknownSession", "unknown Rooms recipient session");
       }
-      const key = input.correlation?.deduplicationKey;
+      const reply = this.resolveReplyMetadata(input);
+      const correlation = reply.correlation as any;
+      const key = correlation?.deduplicationKey;
       if (key) {
         const prior = this.one("SELECT cursor, payload FROM changes WHERE kind='message.sent' AND json_extract(payload, '$.correlation.deduplicationKey')=? ORDER BY cursor LIMIT 1", key);
         if (prior) return { cursor: CursorCodec.encode(BigInt(String(prior.cursor))), didAppend: false, changes: [], event: JSON.parse(asString(prior.payload)), wasDeduplicated: true };
       }
-      if (input.correlation?.replyToEventId) {
-        const prior = this.one("SELECT channel_id FROM changes WHERE kind='message.sent' AND json_extract(payload, '$.id')=? LIMIT 1", input.correlation.replyToEventId);
-        if (!prior || prior.channel_id !== input.channelId) throw new RoomsStoreError("staleReply");
-      }
-      const recipients = input.target?.kind === "direct" ? [input.target.sessionId] : input.target?.sessionIds ?? [];
+      const recipients = target?.kind === "direct" ? [target.sessionId] : target?.sessionIds ?? [];
       const statuses = input.deliveryStatuses ?? Object.fromEntries(recipients.map((id: string) => [id, "delivered"]));
-      const event = { id: `event_${crypto.randomUUID()}`, channelId: input.channelId, senderSessionId: input.senderSessionId, body: input.body, target: input.target, deliveredRecipientSessionIds: recipients.filter((id: string) => statuses[id] === "delivered"), recipientStatuses: statuses, correlation: input.correlation, occurredAt: now() };
+      const event = {
+        id: `event_${crypto.randomUUID()}`,
+        channelId: input.channelId,
+        senderSessionId: input.senderSessionId,
+        body: input.body,
+        target,
+        deliveredRecipientSessionIds: recipients.filter((id: string) => statuses[id] === "delivered"),
+        recipientStatuses: statuses,
+        correlation,
+        replyToEventId: reply.replyToEventId,
+        threadRootEventId: reply.threadRootEventId,
+        occurredAt: now(),
+      };
       const receipt = this.appendChange("message.sent", input.channelId, event);
+      return { ...receipt, event, wasDeduplicated: false };
+    });
+  }
+
+  threadLifecycle(threadRootEventId: string, channelId?: string | null): ThreadLifecycle {
+    const root = this.messageById(threadRootEventId, channelId ?? undefined);
+    const event = root.event as Record<string, unknown>;
+    if (replyEventId(event.replyToEventId, `thread root ${threadRootEventId}.replyToEventId`) !== null) {
+      throw new RoomsStoreError("notThreadRoot", `${threadRootEventId} is a reply, not a thread root`);
+    }
+    const rootChannelId = event.channelId;
+    if (typeof rootChannelId !== "string" || !rootChannelId) throw new RoomsStoreError("threadChannelRequired", "thread lifecycle requires a channel message");
+    const row = this.one("SELECT * FROM message_threads WHERE thread_root_event_id=?", threadRootEventId);
+    return row ? threadLifecycle(row) : {
+      threadRootEventId,
+      channelId: rootChannelId,
+      state: "open",
+      resolvedAt: null,
+      resolvedBySessionId: null,
+      reopenedAt: null,
+      reopenedBySessionId: null,
+      updatedAt: null,
+    };
+  }
+
+  resolveThread(threadRootEventId: string, actorSessionId: string, channelId?: string | null): MutationReceipt & { thread: ThreadLifecycle } {
+    return this.setThreadState(threadRootEventId, actorSessionId, "resolved", channelId);
+  }
+
+  reopenThread(threadRootEventId: string, actorSessionId: string, channelId?: string | null): MutationReceipt & { thread: ThreadLifecycle } {
+    return this.setThreadState(threadRootEventId, actorSessionId, "open", channelId);
+  }
+
+  private setThreadState(threadRootEventId: string, actorSessionId: string, state: "open" | "resolved", channelId?: string | null): MutationReceipt & { thread: ThreadLifecycle } {
+    return this.write(() => {
+      const actor = this.currentSession(actorSessionId);
+      if (!actor || actor.endedAt !== null) throw new RoomsStoreError("unknownSession");
+      const current = this.threadLifecycle(threadRootEventId, channelId);
+      if (!this.isActiveMember(current.channelId, actorSessionId)) throw new RoomsStoreError("notMember");
+      if (current.state === state) return { changes: [], cursor: this.latestCursor(), didAppend: false, thread: current };
+      const changedAt = now();
+      if (state === "resolved") {
+        this.db.prepare(`INSERT INTO message_threads(thread_root_event_id, channel_id, state, resolved_at, resolved_by_session_id, reopened_at, reopened_by_session_id, updated_at)
+          VALUES (?, ?, 'resolved', ?, ?, NULL, NULL, ?)
+          ON CONFLICT(thread_root_event_id) DO UPDATE SET state='resolved', resolved_at=excluded.resolved_at, resolved_by_session_id=excluded.resolved_by_session_id, updated_at=excluded.updated_at`)
+          .run(threadRootEventId, current.channelId, changedAt, actorSessionId, changedAt);
+      } else {
+        this.db.prepare(`UPDATE message_threads SET state='open', reopened_at=?, reopened_by_session_id=?, updated_at=? WHERE thread_root_event_id=?`)
+          .run(changedAt, actorSessionId, changedAt, threadRootEventId);
+      }
+      const thread = this.threadLifecycle(threadRootEventId, current.channelId);
+      const receipt = this.appendChange(state === "resolved" ? "thread.resolved" : "thread.reopened", current.channelId, thread);
+      return { ...receipt, thread };
+    });
+  }
+
+  private resolveReplyMetadata(input: { channelId: string | null; replyToEventId?: string | null; correlation?: unknown }): {
+    replyToEventId: string | null;
+    threadRootEventId: string | null;
+    correlation: unknown;
+  } {
+    const correlationRecord = input.correlation && typeof input.correlation === "object" && !Array.isArray(input.correlation)
+      ? input.correlation as Record<string, unknown>
+      : null;
+    const canonicalReply = replyEventId(input.replyToEventId, "replyToEventId");
+    const legacyReply = replyEventId(correlationRecord?.replyToEventId, "correlation.replyToEventId");
+    if (canonicalReply !== null && legacyReply !== null && canonicalReply !== legacyReply) {
+      throw new RoomsStoreError("invalidReplyMetadata", "replyToEventId must equal correlation.replyToEventId when both are supplied");
+    }
+    const replyToEventId = canonicalReply ?? legacyReply;
+    if (replyToEventId === null) {
+      return { replyToEventId: null, threadRootEventId: null, correlation: input.correlation };
+    }
+
+    const row = this.one("SELECT channel_id, payload FROM changes WHERE kind='message.sent' AND json_extract(payload, '$.id')=? LIMIT 1", replyToEventId);
+    if (!row) throw new RoomsStoreError("staleReply", `reply parent ${replyToEventId} does not exist`);
+    if (row.channel_id !== input.channelId) throw new RoomsStoreError("staleReply", `reply parent ${replyToEventId} belongs to another channel`);
+    const parent = JSON.parse(asString(row.payload)) as Record<string, unknown>;
+    const parentReply = replyEventId(parent.replyToEventId, `reply parent ${replyToEventId}.replyToEventId`);
+    const parentRoot = replyEventId(parent.threadRootEventId, `reply parent ${replyToEventId}.threadRootEventId`);
+    if (parentReply !== null && parentRoot === null) {
+      throw new RoomsStoreError("invalidReplyParent", `reply parent ${replyToEventId} has no canonical thread root`);
+    }
+    const threadRootEventId = parentRoot ?? replyToEventId;
+    const lifecycle = this.one("SELECT state FROM message_threads WHERE thread_root_event_id=?", threadRootEventId);
+    if (lifecycle?.state === "resolved") {
+      throw new RoomsStoreError("threadResolved", `thread ${threadRootEventId} is resolved; reopen it before replying`);
+    }
+    return {
+      replyToEventId,
+      threadRootEventId,
+      correlation: { ...(correlationRecord ?? {}), replyToEventId },
+    };
+  }
+
+  commitControl(input: { channelId: string; senderSessionId: string; kind: string; payload: unknown; requestId: string }): MutationReceipt & { event: unknown; wasDeduplicated?: boolean } {
+    return this.write(() => {
+      const prior = this.one("SELECT cursor, payload FROM changes WHERE kind='control.committed' AND channel_id=? AND json_extract(payload, '$.senderSessionId')=? AND json_extract(payload, '$.requestId')=? ORDER BY cursor LIMIT 1", input.channelId, input.senderSessionId, input.requestId);
+      if (prior) return { cursor: CursorCodec.encode(BigInt(String(prior.cursor))), didAppend: false, changes: [], event: JSON.parse(asString(prior.payload)), wasDeduplicated: true };
+      const event = { id: `control_${crypto.randomUUID()}`, ...input, occurredAt: now() };
+      const receipt = this.appendChange("control.committed", input.channelId, event);
       return { ...receipt, event, wasDeduplicated: false };
     });
   }
@@ -359,6 +832,66 @@ export class RoomsRepository {
     try { n = CursorCodec.decode(afterCursor); } catch { throw new RoomsStoreError("invalidCursor"); }
     const rows = channelId ? this.cursorRows("SELECT * FROM changes WHERE cursor > ? AND (channel_id = ? OR channel_id IS NULL) ORDER BY cursor", n, channelId) : this.cursorRows("SELECT * FROM changes WHERE cursor > ? ORDER BY cursor", n);
     return rows.map(change);
+  }
+
+  messageCursor(eventId: string, channelId?: string): string {
+    const row = channelId
+      ? this.one("SELECT cursor FROM changes WHERE kind='message.sent' AND channel_id=? AND json_extract(payload, '$.id')=?", channelId, eventId)
+      : this.one("SELECT cursor FROM changes WHERE kind='message.sent' AND json_extract(payload, '$.id')=?", eventId);
+    if (!row) throw new RoomsStoreError("unknownMessage");
+    return CursorCodec.encode(BigInt(String(row.cursor)));
+  }
+
+  /** Resolve one canonical message by its opaque event id. */
+  messageById(eventId: string, channelId?: string): { event: unknown; cursor: string } {
+    if (!eventId.trim()) throw new RoomsStoreError("unknownMessage");
+    const row = channelId
+      ? this.one("SELECT cursor, payload FROM changes WHERE kind='message.sent' AND channel_id=? AND json_extract(payload, '$.id')=? LIMIT 1", channelId, eventId)
+      : this.one("SELECT cursor, payload FROM changes WHERE kind='message.sent' AND json_extract(payload, '$.id')=? LIMIT 1", eventId);
+    if (!row) throw new RoomsStoreError("unknownMessage");
+    return { event: JSON.parse(asString(row.payload)), cursor: CursorCodec.encode(BigInt(String(row.cursor))) };
+  }
+
+  /**
+   * Return messages whose canonical correlation points at one exact parent.
+   * The parent lookup fixes the channel, so an id from another channel cannot
+   * be used as a broad JSON search key.
+   */
+  messageReplies(
+    replyToEventId: string,
+    options: { afterCursor?: string; channelId?: string; sessionId?: string; limit?: number } = {},
+  ): { events: unknown[]; cursor: string; oldestCursor: string | null; hasMore: boolean } {
+    let after: bigint;
+    try { after = CursorCodec.decode(options.afterCursor ?? "0"); } catch { throw new RoomsStoreError("invalidCursor"); }
+    const limit = options.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new RoomsStoreError("invalidLimit");
+    const parent = this.messageById(replyToEventId, options.channelId);
+    const parentChannelId = (parent.event as { channelId?: string | null }).channelId ?? null;
+    const sessionClause = options.sessionId ? `AND (
+      json_extract(payload, '$.senderSessionId') = ?
+      OR json_extract(payload, '$.target.sessionId') = ?
+      OR EXISTS (SELECT 1 FROM json_each(payload, '$.deliveredRecipientSessionIds') WHERE value = ?)
+      OR EXISTS (SELECT 1 FROM json_each(payload, '$.target.sessionIds') WHERE value = ?)
+    )` : "";
+    const parameters: Array<string | bigint | number | null> = [after, parentChannelId, replyToEventId];
+    if (options.sessionId) parameters.push(options.sessionId, options.sessionId, options.sessionId, options.sessionId);
+    parameters.push(limit + 1);
+    const rows = this.cursorRows(
+      `SELECT cursor, payload FROM changes
+       WHERE cursor > ? AND kind='message.sent' AND channel_id IS ?
+         AND json_extract(payload, '$.correlation.replyToEventId') = ?
+         ${sessionClause}
+       ORDER BY cursor DESC LIMIT ?`,
+      ...parameters,
+    );
+    const hasMore = rows.length > limit;
+    const page = (hasMore ? rows.slice(0, limit) : rows).reverse();
+    return {
+      events: page.map((row) => JSON.parse(asString(row.payload))),
+      cursor: this.latestCursor(),
+      oldestCursor: page.length > 0 ? CursorCodec.encode(page[0]!.cursor as bigint) : null,
+      hasMore,
+    };
   }
 
   /** Channel federation must never inherit channel-less global messages. */
@@ -430,27 +963,39 @@ export class RoomsRepository {
     const limit = options.limit ?? 50;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new RoomsStoreError("invalidLimit");
     const channelId = options.channelId ?? undefined;
-    // One extra row tells us whether older history exists beyond this page.
+    // One set query returns the newest relevant page and the newest channel
+    // change cursor. Advancing over unrelated messages and delivery records is
+    // what prevents a consumer from replaying them on every reconnect.
     const rows = this.cursorRows(
-      `SELECT cursor, payload FROM changes
-       WHERE cursor > ? AND kind = 'message.sent'
-         ${channelId ? "AND channel_id = ?" : ""}
-         AND (
-           json_extract(payload, '$.senderSessionId') = ?
-           OR json_extract(payload, '$.target.sessionId') = ?
-           OR EXISTS (SELECT 1 FROM json_each(payload, '$.deliveredRecipientSessionIds') WHERE value = ?)
-           OR EXISTS (SELECT 1 FROM json_each(payload, '$.target.sessionIds') WHERE value = ?)
-         )
-       ORDER BY cursor DESC LIMIT ?`,
+      `WITH latest AS (
+         SELECT COALESCE(MAX(cursor), ?) AS cursor FROM changes
+         WHERE cursor > ? ${channelId ? "AND channel_id = ?" : ""}
+       ), relevant AS (
+         SELECT cursor, payload FROM changes
+         WHERE cursor > ? AND kind = 'message.sent'
+           ${channelId ? "AND channel_id = ?" : ""}
+           AND (
+             json_extract(payload, '$.senderSessionId') = ?
+             OR json_extract(payload, '$.target.sessionId') = ?
+             OR EXISTS (SELECT 1 FROM json_each(payload, '$.deliveredRecipientSessionIds') WHERE value = ?)
+             OR EXISTS (SELECT 1 FROM json_each(payload, '$.target.sessionIds') WHERE value = ?)
+           )
+         ORDER BY cursor DESC LIMIT ?
+       )
+       SELECT relevant.cursor, relevant.payload, latest.cursor AS latest_cursor
+       FROM latest LEFT JOIN relevant ON 1=1
+       ORDER BY relevant.cursor DESC`,
       ...(channelId
-        ? [n, channelId, sessionId, sessionId, sessionId, sessionId, limit + 1]
-        : [n, sessionId, sessionId, sessionId, sessionId, limit + 1]),
+        ? [n, n, channelId, n, channelId, sessionId, sessionId, sessionId, sessionId, limit + 1]
+        : [n, n, n, sessionId, sessionId, sessionId, sessionId, limit + 1]),
     );
-    const hasMore = rows.length > limit;
-    const page = (hasMore ? rows.slice(0, limit) : rows).reverse();
+    const relevant = rows.filter((row) => row.payload != null);
+    const hasMore = relevant.length > limit;
+    const page = (hasMore ? relevant.slice(0, limit) : relevant).reverse();
+    const latestCursor = rows[0]?.latest_cursor == null ? n : BigInt(rows[0].latest_cursor as bigint | number);
     return {
       events: page.map((row) => JSON.parse(asString(row.payload))),
-      cursor: page.length > 0 ? CursorCodec.encode(page.at(-1)!.cursor as bigint) : (options.afterCursor ?? "0"),
+      cursor: CursorCodec.encode(latestCursor),
       oldestCursor: page.length > 0 ? CursorCodec.encode(page[0].cursor as bigint) : null,
       hasMore,
     };
@@ -459,6 +1004,7 @@ export class RoomsRepository {
   private latestCursor() { const statement = this.db.prepare("SELECT COALESCE(MAX(cursor), 0) AS cursor FROM changes"); statement.setReadBigInts(true); return CursorCodec.encode(BigInt((statement.get() as Row).cursor as bigint)); }
   private sessionRole(id: string): SessionRole | null { return (this.one("SELECT role FROM sessions WHERE id=?", id)?.role as SessionRole | null) ?? null; }
   sessionRoleValue(id: string): SessionRole | null { return this.sessionRole(id); }
+  sessionDeliveryModeValue(id: string): SessionDeliveryMode | null { const row = this.one("SELECT delivery_mode FROM sessions WHERE id=?", id); return row ? (((row.delivery_mode as SessionDeliveryMode | null) ?? "runtime")) : null; }
   isActiveMember(channelId: string, sessionId: string, role?: SessionRole): boolean { return Boolean(this.one(`SELECT 1 FROM memberships WHERE channel_id=? AND session_id=? AND left_at IS NULL AND session_ended_at IS NULL${role ? " AND role=?" : ""}`, ...(role ? [channelId, sessionId, role] : [channelId, sessionId]))); }
   activeMembershipCount(channelId: string, role: SessionRole): number { return Number((this.one("SELECT COUNT(*) AS count FROM memberships WHERE channel_id=? AND role=? AND left_at IS NULL AND session_ended_at IS NULL", channelId, role) as Row).count); }
   activeMembershipCountExcept(channelId: string, role: SessionRole, sessionId: string): number { return Number((this.one("SELECT COUNT(*) AS count FROM memberships WHERE channel_id=? AND role=? AND session_id<>? AND left_at IS NULL AND session_ended_at IS NULL", channelId, role, sessionId) as Row).count); }
@@ -467,6 +1013,13 @@ export class RoomsRepository {
     return this.write(() => {
       const before = this.sessionRole(sessionId);
       if (before === null) throw new RoomsStoreError("unknownSession");
+      const replacedPlannerIds = role === "planner"
+        ? this.rows("SELECT session_id FROM memberships WHERE channel_id=? AND role='planner' AND session_id<>? AND left_at IS NULL AND session_ended_at IS NULL", channelId, sessionId).map((row) => asString(row.session_id))
+        : [];
+      for (const replacedSessionId of replacedPlannerIds) {
+        this.db.prepare("UPDATE sessions SET role='worker' WHERE id=?").run(replacedSessionId);
+        this.db.prepare("UPDATE memberships SET role='worker' WHERE session_id=? AND left_at IS NULL AND session_ended_at IS NULL").run(replacedSessionId);
+      }
       this.db.prepare("UPDATE sessions SET role=? WHERE id=?").run(role, sessionId);
       this.db.prepare("UPDATE memberships SET role=? WHERE session_id=? AND left_at IS NULL AND session_ended_at IS NULL").run(role, sessionId);
       return this.appendChange("session.role.updated", channelId, {
@@ -474,6 +1027,7 @@ export class RoomsRepository {
         sessionId,
         previousRole: before,
         role,
+        replacedPlannerSessionIds: replacedPlannerIds,
         activeMembershipRolesUpdated: true,
       });
     });
@@ -554,8 +1108,9 @@ export class RoomsRepository {
   }
 }
 
-function session(row: Row): Session { return { id: asString(row.id), registeredAt: asString(row.registered_at), endedAt: row.ended_at as string | null, displayName: row.display_name as string | null, role: row.role as SessionRole | null, providerThreadId: row.provider_thread_id == null ? null : String(row.provider_thread_id) }; }
-function channel(row: Row): Channel { return { id: asString(row.id), label: row.label as string | null, registeredAt: asString(row.registered_at), ownerOperatorSessionId: row.owner_operator_session_id as string | null, lifecycleState: row.lifecycle_state as Channel["lifecycleState"], closedAt: row.closed_at as string | null }; }
+function session(row: Row): Session { return { id: asString(row.id), registeredAt: asString(row.registered_at), endedAt: row.ended_at as string | null, displayName: row.display_name as string | null, role: row.role as SessionRole | null, providerThreadId: row.provider_thread_id == null ? null : String(row.provider_thread_id), deliveryMode: (row.delivery_mode as SessionDeliveryMode | null) ?? "runtime" }; }
+function channel(row: Row): Channel { return { id: asString(row.id), label: row.label as string | null, registeredAt: asString(row.registered_at), ownerOperatorSessionId: row.owner_operator_session_id as string | null, lifecycleState: row.lifecycle_state as Channel["lifecycleState"], closedAt: row.closed_at as string | null, broadcastPolicy: (row.broadcast_policy as ChannelBroadcastPolicy | null) ?? "all" }; }
 function federationChannelAdmission(row: Row): FederationChannelAdmission { return { channelId: asString(row.channel_id), peerAuthorityId: asString(row.peer_authority_id), grantedBySessionId: asString(row.granted_by_session_id), grantedAt: asString(row.granted_at), revokedBySessionId: row.revoked_by_session_id as string | null, revokedAt: row.revoked_at as string | null }; }
 function membership(row: Row): Membership { return { channelId: asString(row.channel_id), sessionId: asString(row.session_id), joinedAt: asString(row.joined_at), leftAt: row.left_at as string | null, sessionEndedAt: row.session_ended_at as string | null, role: row.role as SessionRole | null }; }
+function threadLifecycle(row: Row): ThreadLifecycle { return { threadRootEventId: asString(row.thread_root_event_id), channelId: asString(row.channel_id), state: row.state as ThreadLifecycle["state"], resolvedAt: row.resolved_at as string | null, resolvedBySessionId: row.resolved_by_session_id as string | null, reopenedAt: row.reopened_at as string | null, reopenedBySessionId: row.reopened_by_session_id as string | null, updatedAt: row.updated_at as string | null }; }
 function change(row: Row): Change { return { cursor: CursorCodec.encode(row.cursor as bigint), kind: asString(row.kind), channelId: row.channel_id as string | null, payload: JSON.parse(asString(row.payload)), occurredAt: asString(row.occurred_at) }; }

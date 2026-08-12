@@ -12,7 +12,7 @@ const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
  * input only and never remains a runtime source of truth.
  */
 export function providerLaunchCommand(
-  provider: "codex" | "claude" | "grok",
+  provider: import("./provider-registry.js").RoomsProvider,
   args: readonly string[],
   resumeThreadId?: string,
   homeDirectory = homedir(),

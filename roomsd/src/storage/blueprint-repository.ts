@@ -24,6 +24,21 @@ export class SQLiteBlueprintStore implements BlueprintStore {
     return row ? JSON.parse(String(row.blueprint_json)) as ResumableChannelBlueprint : null;
   }
 
+  retainMembers(channelId: string, activeSessionIds: ReadonlySet<string>): ResumableChannelBlueprint | null {
+    return this.transaction(() => {
+      const blueprint = this.read(channelId);
+      if (!blueprint) return null;
+      const members = blueprint.members.filter(member => activeSessionIds.has(member.priorSessionId));
+      const removed = blueprint.members.filter(member => !activeSessionIds.has(member.priorSessionId)).map(member => member.priorSessionId);
+      if (removed.length === 0) return blueprint;
+      const reconciled = { ...blueprint, members };
+      this.db.prepare("UPDATE channel_blueprints SET blueprint_json=?, updated_at=? WHERE channel_id=?").run(JSON.stringify(reconciled), now(), channelId);
+      const placeholders = removed.map(() => "?").join(", ");
+      this.db.prepare(`DELETE FROM blueprint_member_outcomes WHERE channel_id=? AND prior_session_id IN (${placeholders})`).run(channelId, ...removed);
+      return reconciled;
+    });
+  }
+
   capture(channelId: string, blueprint: ResumableChannelBlueprint, ownerId: string): boolean {
     const result = this.db.prepare("UPDATE channel_blueprints SET blueprint_json=?, updated_at=? WHERE channel_id=? AND state='suspending' AND owner_id=?").run(JSON.stringify(blueprint), now(), channelId, ownerId);
     return Number(result.changes) === 1;
@@ -31,7 +46,7 @@ export class SQLiteBlueprintStore implements BlueprintStore {
   claimSuspend(channelId: string, idempotencyKey: string, blueprint: ResumableChannelBlueprint, ownerId: string): boolean {
     const lease = new Date(Date.now() + this.leaseDurationMs).toISOString();
     const current = this.one("SELECT state FROM channel_blueprints WHERE channel_id=?", channelId)?.state;
-    const result = this.db.prepare("INSERT INTO channel_blueprints(channel_id, blueprint_json, state, idempotency_key, owner_id, lease_until, fence_epoch, updated_at) VALUES (?, ?, 'suspending', ?, ?, ?, 1, ?) ON CONFLICT(channel_id) DO UPDATE SET state='suspending', owner_id=excluded.owner_id, idempotency_key=excluded.idempotency_key, suspend_key_known=1, lease_until=excluded.lease_until, fence_epoch=channel_blueprints.fence_epoch+1, updated_at=excluded.updated_at WHERE (channel_blueprints.state='active') OR (channel_blueprints.state='suspending' AND channel_blueprints.suspend_key_known=1 AND channel_blueprints.idempotency_key=excluded.idempotency_key AND (channel_blueprints.lease_until IS NULL OR channel_blueprints.lease_until <= ?))").run(channelId, JSON.stringify(blueprint), idempotencyKey, ownerId, lease, now(), now());
+    const result = this.db.prepare("INSERT INTO channel_blueprints(channel_id, blueprint_json, state, idempotency_key, owner_id, lease_until, fence_epoch, updated_at) VALUES (?, ?, 'suspending', ?, ?, ?, 1, ?) ON CONFLICT(channel_id) DO UPDATE SET state='suspending', owner_id=excluded.owner_id, idempotency_key=excluded.idempotency_key, suspend_key_known=1, lease_until=excluded.lease_until, fence_epoch=channel_blueprints.fence_epoch+1, updated_at=excluded.updated_at WHERE (channel_blueprints.state='active') OR (channel_blueprints.state='suspended' AND channel_blueprints.suspend_key_known=1 AND channel_blueprints.idempotency_key=excluded.idempotency_key) OR (channel_blueprints.state='suspending' AND channel_blueprints.suspend_key_known=1 AND channel_blueprints.idempotency_key=excluded.idempotency_key AND (channel_blueprints.lease_until IS NULL OR channel_blueprints.lease_until <= ?))").run(channelId, JSON.stringify(blueprint), idempotencyKey, ownerId, lease, now(), now());
     if (Number(result.changes) === 1 && current === "active") this.db.prepare("DELETE FROM blueprint_member_outcomes WHERE channel_id=?").run(channelId);
     return Number(result.changes) === 1;
   }

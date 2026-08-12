@@ -35,6 +35,85 @@ export function requireCurrentSchema(db: DatabaseSync, actor = "Rooms CLI"): voi
 }
 
 type MigrationStep = { version: number; apply: (db: DatabaseSync, originalVersion: number) => void };
+
+type StoredMessage = {
+  cursor: number | bigint;
+  channel_id: string | null;
+  payload: string;
+};
+
+function optionalReplyEventId(value: unknown, context: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 512) {
+    throw new Error(`cannot migrate Rooms reply metadata: invalid reply event id on ${context}`);
+  }
+  return value;
+}
+
+function backfillReplyMetadata(db: DatabaseSync): void {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='changes'").get()) return;
+  const query = db.prepare("SELECT cursor, channel_id, payload FROM changes WHERE kind='message.sent' ORDER BY cursor");
+  query.setReadBigInts(true);
+  const rows = query.all() as unknown as StoredMessage[];
+  const messages = rows.map((row) => {
+    const payload: unknown = JSON.parse(row.payload);
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error(`cannot migrate Rooms reply metadata: message at cursor ${row.cursor} has an invalid payload`);
+    }
+    const event = payload as Record<string, unknown>;
+    if (typeof event.id !== "string" || !event.id.trim()) {
+      throw new Error(`cannot migrate Rooms reply metadata: message at cursor ${row.cursor} has no event id`);
+    }
+    return { ...row, event, id: event.id };
+  });
+  const byId = new Map<string, typeof messages[number]>();
+  for (const message of messages) {
+    if (byId.has(message.id)) throw new Error(`cannot migrate Rooms reply metadata: duplicate event id ${message.id}`);
+    byId.set(message.id, message);
+  }
+
+  const resolved = new Map<string, { threadRootEventId: string | null }>();
+  const update = db.prepare("UPDATE changes SET payload=? WHERE cursor=?");
+  for (const message of messages) {
+    const correlation = message.event.correlation;
+    const legacyReply = correlation && typeof correlation === "object" && !Array.isArray(correlation)
+      ? optionalReplyEventId((correlation as Record<string, unknown>).replyToEventId, `event ${message.id} correlation`)
+      : null;
+    const canonicalReply = message.event.replyToEventId === undefined || message.event.replyToEventId === null
+      ? legacyReply
+      : optionalReplyEventId(message.event.replyToEventId, `event ${message.id}`);
+    let threadRootEventId: string | null = null;
+    if (canonicalReply !== null) {
+      const parent = byId.get(canonicalReply);
+      if (!parent) {
+        throw new Error(`cannot migrate Rooms reply metadata: event ${message.id} references missing parent ${canonicalReply}`);
+      }
+      if (parent.channel_id !== message.channel_id) {
+        throw new Error(`cannot migrate Rooms reply metadata: event ${message.id} references cross-channel parent ${canonicalReply}`);
+      }
+      const parentMetadata = resolved.get(parent.id);
+      if (!parentMetadata) {
+        throw new Error(`cannot migrate Rooms reply metadata: parent ${canonicalReply} does not precede child ${message.id}`);
+      }
+      threadRootEventId = parentMetadata.threadRootEventId ?? parent.id;
+    }
+
+    const migrated: Record<string, unknown> = {
+      ...message.event,
+      replyToEventId: canonicalReply,
+      threadRootEventId,
+    };
+    if (canonicalReply !== null) {
+      migrated.correlation = {
+        ...(correlation && typeof correlation === "object" && !Array.isArray(correlation) ? correlation as Record<string, unknown> : {}),
+        replyToEventId: canonicalReply,
+      };
+    }
+    update.run(JSON.stringify(migrated), message.cursor);
+    resolved.set(message.id, { threadRootEventId });
+  }
+}
+
 const steps: readonly MigrationStep[] = [{ version: 1, apply: (db) => db.exec(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, registered_at TEXT NOT NULL, ended_at TEXT, display_name TEXT, role TEXT CHECK (role IS NULL OR role IN ('operator','planner','worker','reviewer')));
   CREATE TABLE IF NOT EXISTS channels (id TEXT PRIMARY KEY, registered_at TEXT NOT NULL, owner_operator_session_id TEXT REFERENCES sessions(id), lifecycle_state TEXT NOT NULL DEFAULT 'active' CHECK (lifecycle_state IN ('active','closed')), closed_at TEXT);
   CREATE TABLE IF NOT EXISTS memberships (channel_id TEXT NOT NULL REFERENCES channels(id), session_id TEXT NOT NULL REFERENCES sessions(id), joined_at TEXT NOT NULL, left_at TEXT, session_ended_at TEXT, role TEXT, PRIMARY KEY(channel_id, session_id, joined_at));
@@ -151,11 +230,70 @@ const steps: readonly MigrationStep[] = [{ version: 1, apply: (db) => db.exec(`C
   CREATE INDEX federation_channel_admissions_peer_active
     ON federation_channel_admissions(peer_authority_id, channel_id)
     WHERE revoked_at IS NULL;`) }, { version: 15, apply: (db) => {
-      const channels = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channels'").get();
-      if (!channels) return;
-      const present = db.prepare("SELECT 1 FROM pragma_table_info('channels') WHERE name='label'").get();
-      if (!present) db.exec(`ALTER TABLE channels ADD COLUMN label TEXT;`);
-    } }];
+      // Deployed role-handoff-schema15 builds already stamped version 15 with
+      // this exact label migration; the guard keeps both histories converging.
+      // Blueprint-only legacy stores carry no channels table at all; there is
+      // nothing to upgrade in them.
+      if (columnMissing(db, "channels", "label")) db.exec(`ALTER TABLE channels ADD COLUMN label TEXT;`);
+    } }, { version: 16, apply: (db) => {
+      if (columnMissing(db, "sessions", "delivery_mode")) db.exec(`ALTER TABLE sessions ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'runtime' CHECK (delivery_mode IN ('runtime','log'));`);
+    } }, { version: 17, apply: (db) => {
+      if (columnMissing(db, "channels", "broadcast_policy")) db.exec(`ALTER TABLE channels ADD COLUMN broadcast_policy TEXT NOT NULL DEFAULT 'all' CHECK (broadcast_policy IN ('all','privileged'));`);
+    } }, { version: 18, apply: (db) => db.exec(`CREATE TABLE IF NOT EXISTS provider_usage_samples (
+      sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id TEXT,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      runtime_id TEXT NOT NULL REFERENCES runtimes(runtime_id),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      adapter_kind TEXT NOT NULL,
+      provider_thread_id TEXT,
+      status TEXT NOT NULL CHECK (status IN ('available','unavailable','unsupported','privacy')),
+      reason TEXT NOT NULL,
+      input_tokens INTEGER,
+      cached_input_tokens INTEGER,
+      output_tokens INTEGER,
+      total_tokens INTEGER,
+      counter_reset INTEGER NOT NULL DEFAULT 0 CHECK (counter_reset IN (0,1)),
+      sampled_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS provider_usage_samples_session_time ON provider_usage_samples(session_id, sampled_at);
+    CREATE INDEX IF NOT EXISTS provider_usage_samples_channel_time ON provider_usage_samples(channel_id, sampled_at);
+    CREATE INDEX IF NOT EXISTS provider_usage_samples_runtime_time ON provider_usage_samples(runtime_id, generation, sampled_at);`) },
+  { version: 19, apply: (db) => db.exec(`CREATE TABLE IF NOT EXISTS agent_rotations (
+      rotation_id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL REFERENCES channels(id),
+      old_session_id TEXT NOT NULL REFERENCES sessions(id),
+      replacement_session_id TEXT REFERENCES sessions(id),
+      actor_session_id TEXT NOT NULL REFERENCES sessions(id),
+      nonce TEXT NOT NULL UNIQUE,
+      state TEXT NOT NULL CHECK (state IN ('prepared','acknowledged','committed','cleanup_pending','cancelled','rolled_back')),
+      reason TEXT,
+      old_runtime_id TEXT NOT NULL REFERENCES runtimes(runtime_id),
+      old_generation INTEGER NOT NULL,
+      replacement_runtime_id TEXT REFERENCES runtimes(runtime_id),
+      replacement_generation INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS agent_rotations_channel_time ON agent_rotations(channel_id, created_at);`) },
+  { version: 20, apply: backfillReplyMetadata },
+  { version: 21, apply: (db) => db.exec(`
+  CREATE TABLE IF NOT EXISTS message_threads (
+    thread_root_event_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL REFERENCES channels(id),
+    state TEXT NOT NULL CHECK (state IN ('open','resolved')),
+    resolved_at TEXT,
+    resolved_by_session_id TEXT REFERENCES sessions(id),
+    reopened_at TEXT,
+    reopened_by_session_id TEXT REFERENCES sessions(id),
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS message_threads_channel_state ON message_threads(channel_id, state);
+`) }];
+function columnMissing(db: DatabaseSync, table: string, column: string): boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return false;
+  return !db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name=?`).get(column);
+}
 export function migrate(db: DatabaseSync): void {
   const current = schemaVersion(db);
   if (current > SUPPORTED_SCHEMA_VERSION) throw new RoomsSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION, "this Rooms build");

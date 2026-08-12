@@ -1,3 +1,5 @@
+//go:build darwin
+
 // macOS platform adapter for the production Rooms runtime host.
 //
 // Every OS-specific call lives here. Generic host code must not contain

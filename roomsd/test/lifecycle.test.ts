@@ -35,6 +35,37 @@ describe("durable suspend and resume", () => {
     db.close();
   });
 
+  it("reclaims a completed suspension when a later generation or member is live", async () => {
+    const db = new DatabaseSync(":memory:"); migrate(db); db.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now"); const store = new SQLiteBlueprintStore(db);
+    const active = new Set(["old-session:2"]); const stopped: string[] = [];
+    const runtime: RuntimeGenerationPort = {
+      activeGenerations: members => new Set(members.map(member => `${member.priorSessionId}:${member.generation}`).filter(key => active.has(key))),
+      launch: async () => ({ sessionId: "unused", runtimeId: "unused" }),
+      stop: async () => {},
+      stopGeneration: async input => { const key = `${input.priorSessionId}:${input.generation}`; stopped.push(key); active.delete(key); },
+    };
+    const provider: ProviderConversationPort = { stop: async () => {}, stopRollback: async () => {}, resume: async () => {} };
+    const lifecycle = new DurableChannelLifecycle(store, runtime, provider, { deliver: async () => true }, canonical);
+    await lifecycle.suspend("channel-id", "same-key", blueprint);
+    expect(stopped).toEqual(["old-session:2"]);
+
+    const nextBlueprint: ResumableChannelBlueprint = {
+      ...blueprint,
+      members: [
+        { ...blueprint.members[0]!, processGeneration: 3 },
+        { ...blueprint.members[0]!, priorSessionId: "new-session", processGeneration: 1 },
+      ],
+    };
+    db.prepare("UPDATE channel_blueprints SET blueprint_json=? WHERE channel_id=?").run(JSON.stringify(nextBlueprint), "channel-id");
+    active.add("old-session:3"); active.add("new-session:1");
+    await lifecycle.suspend("channel-id", "same-key", nextBlueprint);
+
+    expect(stopped).toEqual(["old-session:2", "old-session:3", "new-session:1"]);
+    expect((store.status("channel-id") as { state: string }).state).toBe("suspended");
+    expect(store.suspensionComplete("channel-id")).toBe(true);
+    db.close();
+  });
+
   it("rolls back a fresh runtime when provider reattachment fails", async () => {
     const db = new DatabaseSync(":memory:"); migrate(db); db.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now"); const store = new SQLiteBlueprintStore(db);
     const stopped: string[] = [];
@@ -58,6 +89,33 @@ describe("durable suspend and resume", () => {
     await lifecycle.suspend("channel-id", "suspend-validation", blueprint);
     await expect(lifecycle.resume("channel-id", "resume-validation", 3)).rejects.toThrow("provider identity is not resumable");
     expect(launches).toBe(0);
+    db.close();
+  });
+
+  it("resumes runtime-owned provider threads through the replacement process", async () => {
+    const db = new DatabaseSync(":memory:"); migrate(db); db.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now"); const store = new SQLiteBlueprintStore(db);
+    const runtimeBlueprint: ResumableChannelBlueprint = { ...blueprint, members: [{ ...blueprint.members[0]!, launch: { executable: "/opt/homebrew/bin/codex", args: ["--yolo"], cwd: "/work" }, provider: { conversationId: "thread-id", resumeDescriptor: { provider: "codex", mode: "runtime", cwd: "/work" } } }] };
+    let launched: unknown; let providerCalls = 0;
+    const runtime: RuntimeGenerationPort = { launch: async input => { launched = input.launch; return { sessionId: input.priorSessionId, runtimeId: "fresh-runtime" }; }, stop: async () => {}, stopGeneration: async () => {} };
+    const provider: ProviderConversationPort = { stop: async () => {}, stopRollback: async () => {}, validateResume: async () => { providerCalls++; }, resume: async () => { providerCalls++; } };
+    const lifecycle = new DurableChannelLifecycle(store, runtime, provider, { deliver: async () => true }, canonical);
+    await lifecycle.suspend("channel-id", "suspend-runtime", runtimeBlueprint);
+    await lifecycle.resume("channel-id", "resume-runtime", 3);
+    expect(launched).toEqual({ executable: "/opt/homebrew/bin/codex", args: ["resume", "thread-id", "--yolo"], cwd: "/work" });
+    expect(providerCalls).toBe(0);
+    db.close();
+  });
+
+  it.each(["claude", "grok"])("wakes a sleeping %s conversation through the provider port", async providerName => {
+    const db = new DatabaseSync(":memory:"); migrate(db); db.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now"); const store = new SQLiteBlueprintStore(db);
+    const headlessBlueprint: ResumableChannelBlueprint = { ...blueprint, members: [{ ...blueprint.members[0]!, adapterKind: providerName, provider: { conversationId: `${providerName}-conversation`, resumeDescriptor: { provider: providerName, cwd: "/work", prompt: `wake ${providerName}` } } }] };
+    const resumed: string[] = [];
+    const runtime: RuntimeGenerationPort = { launch: async () => ({ sessionId: "fresh-session", runtimeId: "fresh-runtime" }), stop: async () => {}, stopGeneration: async () => {} };
+    const provider: ProviderConversationPort = { stop: async () => {}, stopRollback: async () => {}, validateResume: async () => {}, resume: async ref => { resumed.push(ref.conversationId); } };
+    const lifecycle = new DurableChannelLifecycle(store, runtime, provider, { deliver: async () => true }, canonical);
+    await lifecycle.suspend("channel-id", `suspend-${providerName}`, headlessBlueprint);
+    await lifecycle.resume("channel-id", `resume-${providerName}`, 3);
+    expect(resumed).toEqual([`${providerName}-conversation`]);
     db.close();
   });
 
@@ -196,6 +254,51 @@ describe("durable suspend and resume", () => {
     expect(secondStore.resumeLaunches("channel-id", 3)).toEqual([]);
     expect(secondDB.prepare("SELECT left_at FROM memberships WHERE channel_id='channel-id' AND session_id='old-fresh'").get()).toBeUndefined();
     expect(secondDB.prepare("SELECT session_id FROM resumed_members WHERE channel_id='channel-id'").get()).toMatchObject({ session_id: "new-fresh" });
+    firstDB.close(); secondDB.close();
+  });
+
+  it("suspends after mass runtime termination when ownership is already gone", async () => {
+    const db = new DatabaseSync(":memory:"); migrate(db); db.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now"); const store = new SQLiteBlueprintStore(db);
+    let stopCalls = 0;
+    const runtime: RuntimeGenerationPort = {
+      launch: async () => ({ sessionId: "fresh-session", runtimeId: "fresh-runtime" }),
+      stop: async () => {},
+      stopGeneration: async () => { stopCalls++; throw new Error("runtime ownership is not durably proven"); },
+    };
+    const provider: ProviderConversationPort = { stop: async () => { throw new Error("runtime ownership is not durably proven"); }, stopRollback: async () => {}, resume: async () => {} };
+    const lifecycle = new DurableChannelLifecycle(store, runtime, provider, { deliver: async () => true }, canonical);
+    const captured = await lifecycle.suspend("channel-id", "suspend-dead", blueprint);
+    expect(stopCalls).toBe(1);
+    expect(captured.members[0]?.provider?.conversationId).toBe("opaque-conversation");
+    expect((store.status("channel-id") as { state: string }).state).toBe("suspended");
+    const result = await lifecycle.resume("channel-id", "resume-dead", 3);
+    expect(result[0]?.outcome).toBe("resumed");
+    db.close();
+  });
+
+  it("reclaims an expired incomplete resume under the same generation key", async () => {
+    const path = sqlitePath("resume-same-generation");
+    const firstDB = new DatabaseSync(path); const secondDB = new DatabaseSync(path); migrate(firstDB); migrate(secondDB);
+    firstDB.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now");
+    const firstStore = new SQLiteBlueprintStore(firstDB); const secondStore = new SQLiteBlueprintStore(secondDB);
+    const noop: RuntimeGenerationPort = { launch: async () => ({ sessionId: "unused", runtimeId: "unused" }), stop: async () => {}, stopGeneration: async () => {} };
+    const provider: ProviderConversationPort = { stop: async () => {}, stopRollback: async () => {}, resume: async () => {} };
+    await new DurableChannelLifecycle(firstStore, noop, provider, { deliver: async () => true }, canonical, "suspend-owner").suspend("channel-id", "suspend", blueprint);
+    await expect(new DurableChannelLifecycle(firstStore, {
+      launch: async () => { throw new Error("launch failed after terminate"); },
+      stop: async () => {},
+      stopGeneration: async () => {},
+    }, provider, { deliver: async () => true }, canonical, "owner-a").resume("channel-id", "cli-resume-channel-id-3", 3)).rejects.toThrow("launch failed after terminate");
+    expect((firstStore.status("channel-id") as { state: string; generation: number }).state).toBe("suspended");
+    // Simulate a stuck resuming lease from a crash that did not release cleanly.
+    firstDB.prepare("UPDATE channel_blueprints SET state='resuming', resume_key='cli-resume-channel-id-3', resume_owner_id='owner-a', resume_lease_until='1970-01-01T00:00:00.000Z', generation=3, resume_recovery_known=1 WHERE channel_id='channel-id'").run();
+    const result = await new DurableChannelLifecycle(secondStore, {
+      launch: async () => ({ sessionId: "recovered", runtimeId: "recovered-runtime" }),
+      stop: async () => {},
+      stopGeneration: async () => {},
+    }, provider, { deliver: async () => true }, canonical, "owner-b").resume("channel-id", "cli-resume-channel-id-3", 3);
+    expect(result[0]?.runtimeId).toBe("recovered-runtime");
+    expect((secondStore.status("channel-id") as { state: string }).state).toBe("active");
     firstDB.close(); secondDB.close();
   });
 

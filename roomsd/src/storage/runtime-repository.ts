@@ -4,9 +4,9 @@ import { RoomsStoreError } from "./repository.js";
 import type {
   AppendRuntimeEventInput, AttachRuntimeInput, BindRuntimeInput, CreateRuntimeInput,
   Runtime, RuntimeAttachment, RuntimeBinding, RuntimeCapabilityReplay, RuntimeEvent,
-  RuntimeEventKind, RuntimeIdentity, RuntimeQuota,
+  RuntimeEventKind, RuntimeIdentity, RuntimeQuota, RuntimeQuotaStatus, RuntimeState,
 } from "../runtime/contracts.js";
-import type { AttachmentMode, RuntimeAction, RuntimeState } from "../runtime/contracts.js";
+import type { AttachmentMode, RuntimeAction } from "../runtime/contracts.js";
 
 type Row = Record<string, unknown>;
 const now = () => new Date().toISOString();
@@ -16,7 +16,19 @@ const hash = (value: Uint8Array): string => createHash("sha256").update(value).d
 const hasRawBytesKey = (value: Readonly<Record<string, unknown>>): boolean => Object.keys(value).some((key) => /^(bytes|rawBytes|data|chunk|output)$/i.test(key));
 
 export class RuntimeRepository {
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(
+    private readonly db: DatabaseSync,
+    private readonly options: Readonly<{
+      onLifecycleChange?: (change: Readonly<{
+        channelId: string;
+        sessionId: string;
+        runtimeId: string;
+        generation: number;
+        state: string;
+        endedAt: string | null;
+      }>) => void;
+    }> = {},
+  ) {}
 
   create(input: CreateRuntimeInput): Runtime {
     validateIdentity(input);
@@ -43,14 +55,60 @@ export class RuntimeRepository {
   }
 
   setProviderThreadId(runtimeId: string, providerThreadId: string): Runtime {
-    if (!providerThreadId.trim()) throw new RoomsStoreError("invalidProviderThreadId");
-    const runtime = this.get(runtimeId);
-    if (!runtime) throw new RoomsStoreError("runtimeNotFound");
-    this.transaction(() => {
+    const result = this.tryClaimProviderThreadId(runtimeId, providerThreadId, { allowReplace: true });
+    if (!result.claimed) {
+      if (result.reason === "conflict") throw new RoomsStoreError("providerThreadIdConflict");
+      if (result.reason === "runtimeNotFound") throw new RoomsStoreError("runtimeNotFound");
+      throw new RoomsStoreError("invalidProviderThreadId");
+    }
+    return result.runtime;
+  }
+
+  /**
+   * Atomic claim of a provider conversation for one live runtime generation.
+   * BEGIN IMMEDIATE serializes concurrent discoverers: only one live runtime
+   * may hold a given providerThreadId. Losers get claimed=false and continue
+   * discovery instead of throwing.
+   */
+  tryClaimProviderThreadId(
+    runtimeId: string,
+    providerThreadId: string,
+    options: { allowReplace?: boolean } = {},
+  ): { claimed: true; runtime: Runtime } | { claimed: false; reason: "conflict" | "runtimeNotFound" | "invalidProviderThreadId" | "alreadyBound" } {
+    if (!providerThreadId.trim()) return { claimed: false, reason: "invalidProviderThreadId" };
+    return this.transaction(() => {
+      const runtime = this.get(runtimeId);
+      if (!runtime) return { claimed: false, reason: "runtimeNotFound" };
+      // Idempotent re-claim of the id this runtime already holds.
+      if (runtime.providerThreadId === providerThreadId) return { claimed: true, runtime };
+      // Discovery claims only unbound runtimes; explicit set may replace.
+      if (runtime.providerThreadId != null && !options.allowReplace) {
+        return { claimed: false, reason: "alreadyBound" };
+      }
+      // A provider conversation belongs to exactly one live runtime. Two runtimes
+      // sharing one thread id make session identity ambiguous, and the loser's
+      // briefing is delivered into a conversation it does not own.
+      if (this.providerThreadHolderUnsafe(providerThreadId, runtimeId)) {
+        return { claimed: false, reason: "conflict" };
+      }
       this.db.prepare("UPDATE runtimes SET provider_thread_id=?, updated_at=? WHERE runtime_id=?").run(providerThreadId, now(), runtimeId);
       this.db.prepare("UPDATE sessions SET provider_thread_id=? WHERE id=? AND ended_at IS NULL").run(providerThreadId, runtime.sessionId);
+      return { claimed: true, runtime: this.get(runtimeId)! };
     });
-    return this.get(runtimeId)!;
+  }
+
+  /** Live runtime already holding a provider conversation, so a concurrent launch never adopts it. */
+  providerThreadHolder(providerThreadId: string, exceptRuntimeId?: string): string | null {
+    if (!providerThreadId.trim()) return null;
+    return this.providerThreadHolderUnsafe(providerThreadId, exceptRuntimeId);
+  }
+
+  private providerThreadHolderUnsafe(providerThreadId: string, exceptRuntimeId?: string): string | null {
+    const row = this.one(`SELECT runtime_id FROM runtimes
+      WHERE provider_thread_id=? AND runtime_id IS NOT ?
+        AND ended_at IS NULL AND state IN ('creating','running','recovering','terminating')
+      ORDER BY created_at LIMIT 1`, providerThreadId, exceptRuntimeId ?? null);
+    return row ? text(row.runtime_id) : null;
   }
 
   getByIdentity(identity: Pick<RuntimeIdentity, "homeAuthorityId" | "sessionId" | "generation">): Runtime | null {
@@ -63,10 +121,26 @@ export class RuntimeRepository {
     return rows.map(toRuntime);
   }
 
+  plannerCanLaunchWorker(plannerSessionId: string, workerSessionId: string, channelId: string): boolean {
+    if (!plannerSessionId || !workerSessionId || !channelId) return false;
+    return Boolean(this.one(`SELECT 1
+      FROM memberships planner
+      JOIN memberships worker ON worker.channel_id=planner.channel_id
+      JOIN sessions planner_session ON planner_session.id=planner.session_id
+      JOIN sessions worker_session ON worker_session.id=worker.session_id
+      JOIN channels channel ON channel.id=planner.channel_id
+      WHERE planner.channel_id=? AND planner.session_id=? AND planner.role='planner'
+        AND worker.session_id=? AND worker.role='worker'
+        AND planner.left_at IS NULL AND planner.session_ended_at IS NULL
+        AND worker.left_at IS NULL AND worker.session_ended_at IS NULL
+        AND planner_session.ended_at IS NULL AND worker_session.ended_at IS NULL
+        AND channel.lifecycle_state='active'`, channelId, plannerSessionId, workerSessionId));
+  }
+
   bind(input: BindRuntimeInput): RuntimeBinding {
     validateIdentity(input);
     if (!input.bindingId || !input.adapterKind || !input.handleRef) throw new RoomsStoreError("invalidRuntimeBinding");
-    return this.transaction(() => {
+    const binding = this.transaction(() => {
       const runtime = this.requireRuntime(input.runtimeId);
       assertSameGeneration(runtime, input);
       try {
@@ -75,6 +149,8 @@ export class RuntimeRepository {
       } catch (error) { throw mapConstraint(error, "runtimeBindingAlreadyExists"); }
       return this.getBinding(input.runtimeId)!;
     });
+    this.emitLifecycle(input.runtimeId);
+    return binding;
   }
 
   getBinding(runtimeId: string): RuntimeBinding | null {
@@ -148,7 +224,7 @@ export class RuntimeRepository {
   }
 
   markState(runtimeId: string, generation: number, state: RuntimeState, reason?: string | null): Runtime {
-    return this.transaction(() => {
+    const result = this.transaction(() => {
       const runtime = this.requireRuntime(runtimeId);
       if (runtime.generation !== generation) throw new RoomsStoreError("staleRuntimeGeneration");
       const ended = ["exited", "crashed", "terminated"].includes(state) ? now() : null;
@@ -156,6 +232,8 @@ export class RuntimeRepository {
       this.appendEventUnsafe({ runtimeId, generation, kind: state === "recovering" ? "recovering" : state === "crashed" ? "crashed" : state === "exited" ? "exited" : state === "terminated" ? "exited" : "error", outcome: reason ?? state });
       return this.get(runtimeId)!;
     });
+    this.emitLifecycle(runtimeId);
+    return result;
   }
 
   appendEvent(input: AppendRuntimeEventInput): RuntimeEvent {
@@ -206,9 +284,26 @@ export class RuntimeRepository {
     return { ...input, updatedAt };
   }
 
+  clearQuota(machineId: string): void { this.db.prepare("DELETE FROM runtime_quotas WHERE machine_id=?").run(machineId); }
+
   quota(machineId: string): RuntimeQuota {
     const row = this.one("SELECT * FROM runtime_quotas WHERE machine_id=?", machineId);
     return row ? toQuota(row) : { machineId, maxActiveRuntimes: 32, maxObserversPerRuntime: 32, updatedAt: now() };
+  }
+
+  quotaStatuses(machineId?: string): RuntimeQuotaStatus[] {
+    const ids = machineId ? [machineId] : (this.db.prepare(`SELECT machine_id FROM runtimes UNION SELECT machine_id FROM runtime_quotas ORDER BY machine_id`).all() as Row[]).map(row => text(row.machine_id));
+    return ids.map(id => {
+      const override = this.one("SELECT * FROM runtime_quotas WHERE machine_id=?", id);
+      const quota = override ? toQuota(override) : this.quota(id);
+      const states = { creating: 0, running: 0, recovering: 0, crashed: 0, exited: 0, terminating: 0, terminated: 0 } satisfies Record<RuntimeState, number>;
+      for (const row of this.db.prepare("SELECT state, COUNT(*) AS count FROM runtimes WHERE machine_id=? GROUP BY state").all(id) as Row[]) states[text(row.state) as RuntimeState] = Number(row.count);
+      const activeRuntimes = states.creating + states.running + states.recovering + states.terminating;
+      const runtimeCount = Object.values(states).reduce((sum, count) => sum + count, 0);
+      const utilizationPercent = Math.round((activeRuntimes / quota.maxActiveRuntimes) * 100);
+      const capacityState = activeRuntimes >= quota.maxActiveRuntimes ? "exhausted" : utilizationPercent >= 80 ? "warning" : "healthy";
+      return { ...quota, source: override ? "override" : "default", activeRuntimes, availableRuntimes: Math.max(0, quota.maxActiveRuntimes - activeRuntimes), runtimeCount, utilizationPercent, capacityState, states };
+    });
   }
 
   private appendEventUnsafe(input: AppendRuntimeEventInput): RuntimeEvent {
@@ -229,6 +324,21 @@ export class RuntimeRepository {
     const runtime = this.get(runtimeId);
     if (!runtime) throw new RoomsStoreError("runtimeNotFound");
     return runtime;
+  }
+
+  private emitLifecycle(runtimeId: string): void {
+    if (!this.options.onLifecycleChange) return;
+    const runtime = this.get(runtimeId);
+    const binding = this.getBinding(runtimeId);
+    if (!runtime || !binding?.channelId) return;
+    this.options.onLifecycleChange({
+      channelId: binding.channelId,
+      sessionId: runtime.sessionId,
+      runtimeId: runtime.runtimeId,
+      generation: runtime.generation,
+      state: runtime.state,
+      endedAt: runtime.endedAt,
+    });
   }
 
   private one(sql: string, ...params: SQLInputValue[]): Row | undefined { return this.db.prepare(sql).get(...params) as Row | undefined; }

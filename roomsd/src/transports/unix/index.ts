@@ -2,6 +2,9 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { chmod, lstat, stat, unlink } from "node:fs/promises";
 import type { RoomsServiceHandler } from "../../api/service/handler.js";
 import releaseContract from "../../../release-contract.json" with { type: "json" };
+import { queryCorrelationId, withQueryOperation } from "../../storage/query-telemetry.js";
+import { toRoomsError } from "../../api/errors.js";
+import { assertRoomsProtocolVersion } from "../../api/protocol-compatibility.js";
 
 export type RoomsEndpoint =
   | { kind: "unix"; path: string }
@@ -81,22 +84,33 @@ function serveConnection(socket: Socket, handler: RoomsServiceHandler): void {
       const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
       try {
         const request = JSON.parse(line) as { method?: string; request?: unknown; protocolVersion?: number; kind?: string; [key: string]: unknown };
-        if (request.protocolVersion === releaseContract.protocolVersion && typeof request.kind === "string") {
-          legacyQueue = legacyQueue.then(() => serveLegacyConnection(socket, handler, request, connection));
+        if (typeof request.kind === "string") {
+          assertRoomsProtocolVersion(request.protocolVersion);
+          legacyQueue = legacyQueue.then(() => withQueryOperation({
+            operation: `legacy.${request.kind}`,
+            correlationId: typeof request.correlationId === "string" ? request.correlationId : queryCorrelationId(),
+          }, () => serveLegacyConnection(socket, handler, request, connection)));
           continue;
         }
         if (!request.method) throw Object.assign(new Error("missing method"), { code: "invalidRequest" });
+        const requestContext = request.request && typeof request.request === "object"
+          ? (request.request as { context?: { protocolVersion?: unknown } }).context
+          : undefined;
+        assertRoomsProtocolVersion(requestContext?.protocolVersion);
         const method = request.method as keyof RoomsServiceHandler;
         if (typeof handler[method] !== "function") throw Object.assign(new Error(`unknown method ${request.method}`), { code: "unknownMethod" });
         const invoke = handler[method] as unknown as (request: unknown) => unknown;
         const payload = request.request && typeof request.request === "object" ? { ...(request.request as Record<string, unknown>), __connection: connection } : request.request;
-        const result = await invoke(payload);
+        const result = await withQueryOperation({
+          operation: `api.${request.method}`,
+          correlationId: typeof request.correlationId === "string" ? request.correlationId : queryCorrelationId(),
+        }, () => invoke(payload));
         if (isAsyncIterable(result)) {
           for await (const item of result) socket.write(JSON.stringify({ stream: item }) + "\n");
           socket.write(JSON.stringify({ streamEnd: true }) + "\n");
         } else socket.write(JSON.stringify({ response: result }) + "\n");
       }
-      catch (error) { const e = error as { code?: string; message?: string }; socket.write(JSON.stringify({ error: { code: e.code ?? "handlerError", message: e.message ?? "handler error" } }) + "\n"); }
+      catch (error) { socket.write(JSON.stringify({ error: toRoomsError(error) }) + "\n"); }
     }
   });
 }
@@ -137,7 +151,7 @@ async function serveLegacyConnection(socket: Socket, handler: RoomsServiceHandle
       await handler.endSession({ sessionId: String(request.sessionID ?? ""), authorizedBySessionId: request.authorizedBySessionId } as never);
       send({ ok: true });
     } else if (kind === "updateSessionRole") {
-      const result = await handler.updateSessionRole({ channelId: String(request.channelID ?? request.channelId ?? ""), sessionId: String(request.sessionID ?? request.sessionId ?? ""), role: request.role as never, context: { protocolVersion: 1, credential: connection.authenticatedCredential }, __connection: connection } as never) as any;
+      const result = await handler.updateSessionRole({ channelId: String(request.channelID ?? request.channelId ?? ""), sessionId: String(request.sessionID ?? request.sessionId ?? ""), role: request.role as never, context: { protocolVersion: releaseContract.protocolVersion, credential: connection.authenticatedCredential }, __connection: connection } as never) as any;
       send({ ok: true, session: result.session, cursor: result.cursor });
     } else if (kind === "closeChannel") {
       const result = await handler.closeChannel({ channelId: String(request.channelID ?? ""), authorizedBySessionId: request.authorizedBySessionID } as never) as any;
@@ -195,7 +209,7 @@ async function serveLegacyConnection(socket: Socket, handler: RoomsServiceHandle
       const target = requestedTarget?.kind === "directToSession" || requestedTarget?.kind === "direct"
         ? { kind: "direct", sessionId: directSessionId ?? requestedRecipients[0], sessionIds: [directSessionId ?? requestedRecipients[0]] }
         : { kind: "broadcast", sessionIds: requestedRecipients };
-      const result = await handler.send({ channelId: request.channelID ?? null, senderSessionId: connection.authenticatedSessionId, body: request.body, target, correlation: request.correlation, __connection: connection } as never) as any;
+      const result = await handler.send({ channelId: request.channelID ?? null, senderSessionId: connection.authenticatedSessionId, body: request.body, target, replyToEventId: request.replyToEventId ?? request.replyToEventID, correlation: request.correlation, __connection: connection } as never) as any;
       send({ ok: true, event: result.event, cursor: result.cursor });
     } else if (kind === "channelEvents") {
       const result = await handler.getEvents({ channelId: channelID, afterCursor: "0" } as never) as any;
@@ -204,8 +218,13 @@ async function serveLegacyConnection(socket: Socket, handler: RoomsServiceHandle
       const result = await handler.getSnapshot({ channelId: channelID } as never) as any;
       const snapshot = result.snapshot;
       send({ ok: true, snapshot: { channel: snapshot.channel, roster: snapshot.sessions.map((session: any) => ({ sessionID: session.id, displayName: session.displayName, joinedAt: session.registeredAt, role: session.role ?? "worker" })), sessions: snapshot.sessions, events: snapshot.events, cursor: snapshot.cursor } });
+    } else if (kind === "channelStateSnapshots") {
+      if (!handler.channelStateSnapshots) throw Object.assign(new Error("channel state snapshots are unavailable"), { code: "unsupported" });
+      const channelIDs = Array.isArray(request.channelIDs) ? request.channelIDs.map(String) : channelID ? [channelID] : [];
+      const result = await handler.channelStateSnapshots({ channelIds: channelIDs });
+      send({ ok: true, ...result });
     } else if (kind === "search") {
-      const result = await handler.search({ channelId: channelID, query: request.query, afterCursor: "0" } as never) as any;
+      const result = await handler.search({ channelId: channelID, query: request.query, scope: channelID ? "channel" : "all", limit: request.limit ?? 50 } as never) as any;
       send({ ok: true, events: result.events ?? [] });
     } else if (kind === "recipients") {
       const result = await handler.getRecipients({ eventId: request.eventID ?? request.eventId } as never) as any;
@@ -216,7 +235,7 @@ async function serveLegacyConnection(socket: Socket, handler: RoomsServiceHandle
       for await (const item of result) {
         const value = item as any;
         if (value.snapshot) send({ change: { channelID, ...value.snapshot } });
-        else if (value.delta) send({ change: { channelID: value.delta.channelId, event: value.delta.payload, cursor: value.delta.cursor } });
+        else if (value.delta) send({ change: { channelID: value.delta.channelId, kind: value.delta.kind, event: value.delta.payload, cursor: value.delta.cursor } });
       }
     } else throw Object.assign(new Error(`unknown legacy operation ${kind}`), { code: "unknownMethod" });
   } catch (error) { const e = error as { code?: string; message?: string }; send({ ok: false, errorCode: e.code ?? "handlerError", errorDescription: e.message ?? "handler error" }); }

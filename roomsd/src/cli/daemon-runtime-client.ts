@@ -1,5 +1,6 @@
 import { lstatSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
+import { ROOMS_PROTOCOL_MAX_VERSION } from "../api/protocol-compatibility.js";
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -9,7 +10,7 @@ export class RoomsDaemonRuntimeClient {
 
   async call(method: string, request: object): Promise<unknown> {
     const socket = await this.connect();
-    try { return await call(socket, method, request as Record<string, unknown>); }
+    try { return await call(socket, method, withProtocolContext(request)); }
     finally { socket.destroy(); }
   }
 
@@ -17,7 +18,7 @@ export class RoomsDaemonRuntimeClient {
     const socket = await this.connect();
     try {
       const credential = await authenticate(socket, sessionId);
-      return await call(socket, method, { ...(request as Record<string, unknown>), context: { protocolVersion: 1, credential } });
+      return await call(socket, method, withProtocolContext(request, credential));
     } finally { socket.destroy(); }
   }
 
@@ -79,7 +80,7 @@ export class RoomsDaemonRuntimeClient {
       });
       socket.once("error", fail);
       socket.once("close", () => { if (!settled) reject(new Error("roomsd closed before interactive attach completed")); else handlers.onClose(); });
-      socket.write(`${JSON.stringify({ method: "runtimeAttachStream", request: { ...(request as Record<string, unknown>), context: { protocolVersion: 1, credential } } })}\n`);
+      socket.write(`${JSON.stringify({ method: "runtimeAttachStream", request: withProtocolContext(request, credential) })}\n`);
     });
   }
 
@@ -107,10 +108,16 @@ export class RoomsDaemonRuntimeClient {
 }
 
 async function authenticate(socket: Socket, sessionId: string): Promise<string> {
-  const credentialResponse = await call(socket, "issueCredential", { sessionId }) as { credential?: string };
+  const credentialResponse = await call(socket, "issueCredential", withProtocolContext({ sessionId })) as { credential?: string };
   if (!credentialResponse.credential) throw new Error("roomsd did not issue a runtime credential");
-  await call(socket, "authenticate", { credential: credentialResponse.credential });
+  await call(socket, "authenticate", withProtocolContext({ credential: credentialResponse.credential }));
   return credentialResponse.credential;
+}
+
+function withProtocolContext(request: object, credential?: string): Record<string, unknown> {
+  const value = request as Record<string, unknown>;
+  const current = value.context && typeof value.context === "object" ? value.context as Record<string, unknown> : {};
+  return { ...value, context: { ...current, protocolVersion: ROOMS_PROTOCOL_MAX_VERSION, ...(credential ? { credential } : {}) } };
 }
 
 function call(socket: Socket, method: string, request: Record<string, unknown>): Promise<unknown> {
@@ -126,10 +133,17 @@ function call(socket: Socket, method: string, request: Record<string, unknown>):
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       cleanup();
-      let parsed: { response?: unknown; error?: { code?: string; message?: string } };
+      let parsed: { response?: unknown; error?: { code?: string; domainCode?: string; message?: string } };
       try { parsed = JSON.parse(buffer.slice(0, newline)); }
       catch { return reject(new Error("roomsd returned malformed JSON")); }
-      if (parsed.error) return reject(Object.assign(new Error(parsed.error.message ?? "roomsd request failed"), { code: parsed.error.code }));
+      if (parsed.error) {
+        const domainCode = parsed.error.domainCode;
+        const message = parsed.error.message ?? "roomsd request failed";
+        return reject(Object.assign(new Error(domainCode ? `${domainCode}: ${message}` : message), {
+          code: domainCode ?? parsed.error.code,
+          transportCode: parsed.error.code,
+        }));
+      }
       resolve(parsed.response);
     };
     socket.on("data", onData); socket.once("error", onError); socket.once("close", onClose);

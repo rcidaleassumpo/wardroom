@@ -1,21 +1,230 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverProviderThreadId } from "../src/runtime/service.js";
+import { canonicalProviderCwd, claudeProjectKey, discoverProviderThreadId } from "../src/runtime/service.js";
+import { RoomsRepository } from "../src/storage/repository.js";
+import { RuntimeRepository } from "../src/storage/runtime-repository.js";
+
+function writeClaudeTranscript(sessionId: string, cwd?: string): { home: string; cwd: string } {
+  const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-"));
+  const actualCwd = cwd ?? join(home, "project");
+  mkdirSync(actualCwd, { recursive: true });
+  const project = claudeProjectKey(canonicalProviderCwd(actualCwd)!);
+  mkdirSync(join(home, ".claude", "projects", project), { recursive: true });
+  writeFileSync(join(home, ".claude", "projects", project, `${sessionId}.jsonl`), JSON.stringify({ type: "mode", sessionId }) + "\n");
+  return { home, cwd: actualCwd };
+}
+
+function writeGrokSession(home: string, cwd: string, sessionId: string, mtimeSec: number): void {
+  const dir = join(home, ".grok", "sessions", encodeURIComponent(canonicalProviderCwd(cwd)!), sessionId);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "events.jsonl");
+  writeFileSync(path, `${JSON.stringify({ ts: "2026-01-01T00:00:00.000Z", type: "turn_started", session_id: sessionId })}\n`);
+  utimesSync(path, mtimeSec, mtimeSec);
+}
 
 describe("provider-native identity discovery", () => {
   it("captures Claude's native session id from the newly-created transcript", async () => {
-    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-"));
-    const cwd = "/Users/test/project";
-    const project = cwd.replace(/[^A-Za-z0-9_-]/g, value => value === "/" ? "-" : `-${value.charCodeAt(0).toString(16)}-`);
-    const transcript = join(home, ".claude", "projects", project, "native-thread.jsonl");
-    mkdirSync(join(home, ".claude", "projects", project), { recursive: true });
-    writeFileSync(transcript, JSON.stringify({ type: "mode", sessionId: "claude-native-thread-1" }) + "\n");
+    const { home, cwd } = writeClaudeTranscript("claude-native-thread-1");
     expect(await discoverProviderThreadId("claude", cwd, Date.now() - 1000, home)).toBe("claude-native-thread-1");
   });
 
+  it("finds Claude's transcript when the launch cwd uses a filesystem alias", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-alias-"));
+    const realCwd = join(home, "real-project");
+    const aliasCwd = join(home, "project-alias");
+    mkdirSync(realCwd);
+    symlinkSync(realCwd, aliasCwd);
+    const canonicalCwd = canonicalProviderCwd(aliasCwd)!;
+    const project = claudeProjectKey(canonicalCwd);
+    mkdirSync(join(home, ".claude", "projects", project), { recursive: true });
+    writeFileSync(join(home, ".claude", "projects", project, "claude-aliased-thread.jsonl"), JSON.stringify({ type: "mode", sessionId: "claude-aliased-thread" }) + "\n");
+
+    expect(canonicalCwd).toBe(realpathSync.native(realCwd));
+    expect(await discoverProviderThreadId("claude", aliasCwd, Date.now() - 1000, home)).toBe("claude-aliased-thread");
+  });
+
+  it("matches Claude 2.1.227 project keys for a dotted canonical cwd", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-dotted-"));
+    const cwd = join(home, "rooms-proof.vPeuR6");
+    mkdirSync(cwd);
+    const canonicalCwd = canonicalProviderCwd(cwd)!;
+    const project = claudeProjectKey(canonicalCwd);
+    mkdirSync(join(home, ".claude", "projects", project), { recursive: true });
+    writeFileSync(join(home, ".claude", "projects", project, "claude-dotted-thread.jsonl"), JSON.stringify({ type: "mode", sessionId: "claude-dotted-thread" }) + "\n");
+
+    expect(project).toBe(canonicalCwd.replace(/[^A-Za-z0-9_-]/g, "-"));
+    expect(project).not.toContain("-2e-");
+    expect(await discoverProviderThreadId("claude", cwd, Date.now() - 1000, home)).toBe("claude-dotted-thread");
+  });
+
   it("does not infer an identity for unsupported providers", async () => {
-    expect(await discoverProviderThreadId("grok", "/tmp/project", 0, "/tmp")).toBeNull();
+    expect(await discoverProviderThreadId("localPty", "/tmp/project", 0, "/tmp")).toBeNull();
+  });
+
+  it("captures Grok's native session id from the cwd-scoped events.jsonl binding", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-grok-"));
+    const cwd = join(home, "project");
+    mkdirSync(cwd);
+    const sessionId = "019ff222-b397-7b22-a294-88a49c70f2ae";
+    const dir = join(home, ".grok", "sessions", encodeURIComponent(canonicalProviderCwd(cwd)!), sessionId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "events.jsonl"), `${JSON.stringify({ ts: "2026-01-01T00:00:00.000Z", type: "turn_started", session_id: sessionId })}\n`);
+    expect(await discoverProviderThreadId("grok", cwd, Date.now() - 1000, home)).toBe(sessionId);
+  });
+
+  it("never binds a Grok session from a different cwd even if it is newer", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-grok-other-"));
+    const cwd = join(home, "project-a");
+    const other = join(home, "project-b");
+    mkdirSync(cwd);
+    mkdirSync(other);
+    const dirOther = join(home, ".grok", "sessions", encodeURIComponent(canonicalProviderCwd(other)!), "other-sess");
+    mkdirSync(dirOther, { recursive: true });
+    writeFileSync(join(dirOther, "events.jsonl"), `${JSON.stringify({ type: "turn_started" })}\n`);
+    expect(await discoverProviderThreadId("grok", cwd, Date.now() - 1000, home, { timeoutMs: 250 })).toBeNull();
+  });
+
+  it("never adopts a transcript another live runtime already claimed", async () => {
+    const { home, cwd } = writeClaudeTranscript("claude-native-thread-2");
+    const claimed: string[] = [];
+    expect(await discoverProviderThreadId("claude", cwd, Date.now() - 1000, home, {
+      timeoutMs: 250,
+      isClaimed: (candidate) => { claimed.push(candidate); return true; },
+    })).toBeNull();
+    expect(claimed).toContain("claude-native-thread-2");
+  });
+
+  it("stops polling once the runtime it belongs to is no longer alive", async () => {
+    const { home, cwd } = writeClaudeTranscript("claude-native-thread-3");
+    expect(await discoverProviderThreadId("claude", cwd, Date.now() - 1000, home, {
+      timeoutMs: 60_000,
+      keepPolling: () => false,
+    })).toBeNull();
+  });
+
+  it("concurrent same-cwd Claude discovery binds each transcript to its ownership marker, not the newest file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-claude-race-"));
+    const cwd = join(home, "same-cwd-project");
+    mkdirSync(cwd);
+    const canonicalCwd = canonicalProviderCwd(cwd)!;
+    const project = claudeProjectKey(canonicalCwd);
+    const projectDir = join(home, ".claude", "projects", project);
+    mkdirSync(projectDir, { recursive: true });
+    const olderId = "claude-sess-older-a";
+    const newerId = "claude-sess-newer-b";
+    const olderPath = join(projectDir, `${olderId}.jsonl`);
+    const newerPath = join(projectDir, `${newerId}.jsonl`);
+    // Newer file is written first in discovery sort without markers; each body
+    // embeds only its Rooms session id so ownership cannot be swapped.
+    writeFileSync(newerPath, `${JSON.stringify({ type: "mode", sessionId: newerId })}\nRooms session id: session-b\n`);
+    writeFileSync(olderPath, `${JSON.stringify({ type: "mode", sessionId: olderId })}\nRooms session id: session-a\n`);
+    const base = Math.floor(Date.now() / 1000) - 20;
+    utimesSync(olderPath, base, base);
+    utimesSync(newerPath, base + 5, base + 5);
+
+    const database = new RoomsRepository(":memory:");
+    try {
+      database.insertSession({ id: "session-a", role: "worker" });
+      database.insertSession({ id: "session-b", role: "worker" });
+      const runtimes = new RuntimeRepository(database.db);
+      const seed = { homeAuthorityId: "authority-a", generation: 1, protocolVersion: 1, transportKind: "localPty" as const, machineId: "machine-a", reconnectSecret: new Uint8Array(32), providerThreadId: null as string | null };
+      runtimes.create({ ...seed, runtimeId: "runtime-a", sessionId: "session-a" });
+      runtimes.markState("runtime-a", 1, "running");
+      runtimes.create({ ...seed, runtimeId: "runtime-b", sessionId: "session-b" });
+      runtimes.markState("runtime-b", 1, "running");
+
+      const launchedAfter = Date.now() - 60_000;
+      const [idA, idB] = await Promise.all([
+        discoverProviderThreadId("claude", cwd, launchedAfter, home, {
+          timeoutMs: 2_000,
+          ownershipMarker: "session-a",
+          isClaimed: (candidate) => runtimes.providerThreadHolder(candidate, "runtime-a") !== null,
+          tryClaim: (candidate) => runtimes.tryClaimProviderThreadId("runtime-a", candidate).claimed,
+          keepPolling: () => runtimes.get("runtime-a")?.providerThreadId == null,
+        }),
+        discoverProviderThreadId("claude", cwd, launchedAfter, home, {
+          timeoutMs: 2_000,
+          ownershipMarker: "session-b",
+          isClaimed: (candidate) => runtimes.providerThreadHolder(candidate, "runtime-b") !== null,
+          tryClaim: (candidate) => runtimes.tryClaimProviderThreadId("runtime-b", candidate).claimed,
+          keepPolling: () => runtimes.get("runtime-b")?.providerThreadId == null,
+        }),
+      ]);
+
+      expect(idA).toBe(olderId);
+      expect(idB).toBe(newerId);
+      expect(runtimes.get("runtime-a")?.providerThreadId).toBe(olderId);
+      expect(runtimes.get("runtime-b")?.providerThreadId).toBe(newerId);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("does not claim a newer Claude transcript that lacks this launch's ownership marker", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-claude-marker-"));
+    const cwd = join(home, "project");
+    mkdirSync(cwd);
+    const canonicalCwd = canonicalProviderCwd(cwd)!;
+    const project = claudeProjectKey(canonicalCwd);
+    mkdirSync(join(home, ".claude", "projects", project), { recursive: true });
+    const wrong = join(home, ".claude", "projects", project, "wrong-session.jsonl");
+    writeFileSync(wrong, `${JSON.stringify({ type: "mode", sessionId: "wrong-session" })}\nRooms session id: other-session\n`);
+    expect(await discoverProviderThreadId("claude", cwd, Date.now() - 1000, home, {
+      timeoutMs: 300,
+      ownershipMarker: "my-session",
+    })).toBeNull();
+  });
+
+  it("concurrent same-cwd Grok discovery binds two different session ids under overlapping tryClaim", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rooms-provider-id-grok-race-"));
+    const cwd = join(home, "same-cwd-project");
+    mkdirSync(cwd);
+    const olderId = "grok-sess-older";
+    const newerId = "grok-sess-newer";
+    const base = Math.floor(Date.now() / 1000) - 10;
+    writeGrokSession(home, cwd, olderId, base);
+    writeGrokSession(home, cwd, newerId, base + 5); // both pick newest first under mtime sort
+
+    const database = new RoomsRepository(":memory:");
+    try {
+      database.insertSession({ id: "session-a", role: "worker" });
+      database.insertSession({ id: "session-b", role: "worker" });
+      const runtimes = new RuntimeRepository(database.db);
+      const seed = { homeAuthorityId: "authority-a", generation: 1, protocolVersion: 1, transportKind: "localPty" as const, machineId: "machine-a", reconnectSecret: new Uint8Array(32), providerThreadId: null as string | null };
+      runtimes.create({ ...seed, runtimeId: "runtime-a", sessionId: "session-a" });
+      runtimes.markState("runtime-a", 1, "running");
+      runtimes.create({ ...seed, runtimeId: "runtime-b", sessionId: "session-b" });
+      runtimes.markState("runtime-b", 1, "running");
+
+      const launchedAfter = Date.now() - 60_000;
+      // Overlapping discovery: both see the same newest unclaimed candidate first;
+      // atomic tryClaim lets only one win it; the loser continues to the older id.
+      const [idA, idB] = await Promise.all([
+        discoverProviderThreadId("grok", cwd, launchedAfter, home, {
+          timeoutMs: 2_000,
+          isClaimed: (candidate) => runtimes.providerThreadHolder(candidate, "runtime-a") !== null,
+          tryClaim: (candidate) => runtimes.tryClaimProviderThreadId("runtime-a", candidate).claimed,
+          keepPolling: () => runtimes.get("runtime-a")?.providerThreadId == null,
+        }),
+        discoverProviderThreadId("grok", cwd, launchedAfter, home, {
+          timeoutMs: 2_000,
+          isClaimed: (candidate) => runtimes.providerThreadHolder(candidate, "runtime-b") !== null,
+          tryClaim: (candidate) => runtimes.tryClaimProviderThreadId("runtime-b", candidate).claimed,
+          keepPolling: () => runtimes.get("runtime-b")?.providerThreadId == null,
+        }),
+      ]);
+
+      expect(idA).toBeTruthy();
+      expect(idB).toBeTruthy();
+      expect(idA).not.toBe(idB);
+      expect(new Set([idA, idB])).toEqual(new Set([newerId, olderId]));
+      expect(runtimes.get("runtime-a")?.providerThreadId).toBe(idA);
+      expect(runtimes.get("runtime-b")?.providerThreadId).toBe(idB);
+      expect(runtimes.get("runtime-a")?.providerThreadId).not.toBe(runtimes.get("runtime-b")?.providerThreadId);
+    } finally {
+      database.close();
+    }
   });
 });

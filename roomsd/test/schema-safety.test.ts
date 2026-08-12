@@ -15,6 +15,88 @@ import { RoomsSchemaVersionError, SUPPORTED_SCHEMA_VERSION } from "../src/storag
 import { RoomsRepository } from "../src/storage/repository.js";
 
 describe("Rooms schema safety", () => {
+  it("backfills legacy reply chains and reopens the upgraded store", () => {
+    const directory = mkdtempSync(join(tmpdir(), "rooms-schema-replies-"));
+    const path = join(directory, "rooms.sqlite");
+    const database = new DatabaseSync(path);
+    database.exec(`CREATE TABLE changes (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      channel_id TEXT,
+      payload TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      source_ordinal INTEGER
+    ); PRAGMA user_version=17;`);
+    const insert = database.prepare("INSERT INTO changes(kind, channel_id, payload, occurred_at) VALUES ('message.sent', ?, ?, '2026-08-12T00:00:00.000Z')");
+    insert.run("proof", JSON.stringify({ id: "root", correlation: { purpose: "root" } }));
+    insert.run("other", JSON.stringify({ id: "other-root" }));
+    insert.run("proof", JSON.stringify({ id: "reply", correlation: { purpose: "legacy", replyToEventId: "root" } }));
+    insert.run("proof", JSON.stringify({ id: "nested", replyToEventId: "reply", correlation: { replyToEventId: "other-root" } }));
+    database.close();
+
+    const migrated = new RoomsRepository(path);
+    const events = migrated.replay("0").map((change) => change.payload as any);
+    expect(events).toEqual([
+      expect.objectContaining({ id: "root", replyToEventId: null, threadRootEventId: null }),
+      expect.objectContaining({ id: "other-root", replyToEventId: null, threadRootEventId: null }),
+      expect.objectContaining({ id: "reply", replyToEventId: "root", threadRootEventId: "root", correlation: { purpose: "legacy", replyToEventId: "root" } }),
+      expect.objectContaining({ id: "nested", replyToEventId: "reply", threadRootEventId: "root", correlation: { replyToEventId: "reply" } }),
+    ]);
+    migrated.close();
+
+    const reopened = new RoomsRepository(path, { schemaPolicy: "require-current", schemaActor: "reply reopen proof" });
+    expect(reopened.userVersion()).toBe(SUPPORTED_SCHEMA_VERSION);
+    reopened.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("rolls back reply migration when a legacy parent is missing", () => {
+    const directory = mkdtempSync(join(tmpdir(), "rooms-schema-missing-reply-"));
+    const path = join(directory, "rooms.sqlite");
+    const database = new DatabaseSync(path);
+    database.exec(`CREATE TABLE changes (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      channel_id TEXT,
+      payload TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      source_ordinal INTEGER
+    );
+    INSERT INTO changes(kind, channel_id, payload, occurred_at)
+      VALUES ('message.sent', 'proof', '{"id":"child","correlation":{"replyToEventId":"missing"}}', '2026-08-12T00:00:00.000Z');
+    PRAGMA user_version=17;`);
+    database.close();
+
+    expect(() => new RoomsRepository(path)).toThrow(/references missing parent missing/);
+    const unchanged = new DatabaseSync(path, { readOnly: true });
+    expect(Number((unchanged.prepare("PRAGMA user_version").get() as Record<string, unknown>).user_version)).toBe(17);
+    expect(JSON.parse(String((unchanged.prepare("SELECT payload FROM changes").get() as Record<string, unknown>).payload))).not.toHaveProperty("replyToEventId");
+    unchanged.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("reports a cross-channel legacy reply instead of assigning a thread root", () => {
+    const directory = mkdtempSync(join(tmpdir(), "rooms-schema-cross-reply-"));
+    const path = join(directory, "rooms.sqlite");
+    const database = new DatabaseSync(path);
+    database.exec(`CREATE TABLE changes (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      channel_id TEXT,
+      payload TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      source_ordinal INTEGER
+    );
+    INSERT INTO changes(kind, channel_id, payload, occurred_at) VALUES
+      ('message.sent', 'one', '{"id":"root"}', '2026-08-12T00:00:00.000Z'),
+      ('message.sent', 'two', '{"id":"child","correlation":{"replyToEventId":"root"}}', '2026-08-12T00:00:01.000Z');
+    PRAGMA user_version=17;`);
+    database.close();
+
+    expect(() => new RoomsRepository(path)).toThrow(/references cross-channel parent root/);
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   it("migrates channel labels and reopens the upgraded store", () => {
     const directory = mkdtempSync(join(tmpdir(), "rooms-schema-label-"));
     const path = join(directory, "rooms.sqlite");

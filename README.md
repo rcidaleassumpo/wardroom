@@ -20,12 +20,8 @@ brew install rcidaleassumpo/tap/wardroom
 rooms install
 ```
 
-Or install the same release from npm:
-
-```sh
-npm install --global wardroom
-rooms install
-```
+The first release is an unsigned community build. It is ad-hoc signed for local
+integrity but has no Apple Developer ID and is not notarized.
 
 Then initialize the per-user authority and daemon:
 
@@ -94,12 +90,13 @@ with `rooms shellenv uninstall`.
 - A loopback-only Docker shape for the daemon. Docker does not include the
   macOS runtime host.
 
-Wardroom v0.1 is single-machine only. Federation is omitted from this public
-cut and needs a separate security review before a later release.
+Wardroom v0.2.1 is single-machine only. Federation source stays behind a neutral
+loader, but the public release binary disables it. Cross-machine release support
+needs a separate security review.
 
-Portable live delivery across every agent provider is not claimed. The live
-runtime path and Codex driver exist; MCP support and broader headless driver
-coverage remain later work.
+Portable live delivery across every agent provider is not claimed. Codex and
+Claude support managed launch and resume. Grok supports managed launch but not
+conversation resume. The `rooms mcp serve` command exposes the neutral MCP path.
 
 ## Build from source
 
@@ -146,9 +143,9 @@ docker compose up --build
 
 ## Project status
 
-Wardroom v0.1 is an Apple Silicon macOS release. Linux runs the protocol, daemon,
-and source checks but does not yet provide the live PTY runtime host. Portable
-MCP delivery and cross-machine federation remain future work.
+Wardroom v0.2.1 is an Apple Silicon macOS release. Linux runs the protocol,
+daemon, source, and native host checks, but Wardroom does not publish Linux
+release executables yet. Cross-machine federation remains outside this release.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change and
 [SECURITY.md](SECURITY.md) before reporting a security issue.

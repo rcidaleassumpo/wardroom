@@ -29,7 +29,7 @@ export type FederationModule = FederationCompositionPlug & Readonly<{
   configureMachineRoute(authorityId: AuthorityId, flags: ReadonlyMap<string, string>): unknown;
   inspectMachine(authorityIdInput: string | undefined, backend: RoomsCLIBackend, options?: Readonly<{ stateDir?: string; includeEnded?: boolean; sshHost?: string; remoteStateDir?: string }>): Promise<unknown>;
   locateSession(sessionIdInput: string, backend: RoomsCLIBackend, options?: Readonly<{ stateDir?: string; includeEnded?: boolean }>): Promise<unknown>;
-  runInteractiveRemoteRuntimeAttach(input: Readonly<{ sessionId: string; sshHost: string; peerAuthorityId: AuthorityId; capabilityFile?: string; localStateDir?: string; remoteStateDir?: string; mode: "observe" | "controller"; outputCursor?: string }>): Promise<void>;
+  runInteractiveRemoteRuntimeAttach(input: Readonly<{ sessionId: string; sshHost: string; peerAuthorityId: AuthorityId; capabilityFile: string; localStateDir?: string; remoteStateDir?: string; mode: "observe" | "controller"; outputCursor?: string }>): Promise<void>;
 }>;
 
 let registered: FederationModule | null | undefined;

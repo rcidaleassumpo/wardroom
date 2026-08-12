@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
@@ -13,7 +13,7 @@ import { RuntimeHostClient } from "./host/client.js";
 import { RuntimeHostSupervisor } from "./host/supervisor.js";
 import type { HostError, HostExit, HostHelloAck, HostOutput } from "./host/codec.js";
 import { ensureRuntimeSocketDirectory, parseRuntimeHandle, runtimeHandleRef, runtimeSocketPath } from "./host/endpoint.js";
-import type { RuntimeAction, RuntimeAttachment, RuntimeBinding, RuntimeEvent, Runtime, RuntimeActor } from "./contracts.js";
+import type { RuntimeAction, RuntimeAttachment, RuntimeBinding, RuntimeEvent, Runtime, RuntimeActor, RuntimeQuotaStatus } from "./contracts.js";
 import { RuntimeRepository } from "../storage/runtime-repository.js";
 import { RoomsStoreError } from "../storage/repository.js";
 import { readMachineIdentityStatus } from "../identity/machine-identity.js";
@@ -25,8 +25,14 @@ import { readMachineIdentityStatus } from "../identity/machine-identity.js";
  * behaves like a user pressing Enter after the paste.
  */
 export function encodeProviderSubmission(body: string): { frames: string[]; delaysMs: number[] } {
+  // On an empty composer, provider TUIs treat a leading "!", "/", or "#" as a
+  // mode prefix (Claude Code: shell mode, slash command, memory), so a channel
+  // body like "!task add ..." would flip the session into shell mode instead
+  // of arriving as text. A leading space defuses the prefix and is invisible
+  // in the delivered message.
+  const guarded = /^[!/#]/.test(body) ? ` ${body}` : body;
   return {
-    frames: [Buffer.from(body).toString("base64"), Buffer.from("\r").toString("base64")],
+    frames: [Buffer.from(guarded).toString("base64"), Buffer.from("\r").toString("base64")],
     delaysMs: [0, 75],
   };
 }
@@ -45,41 +51,171 @@ const toBinding = (binding: RuntimeBinding) => ({ bindingId: binding.bindingId, 
 const toAttachment = (attachment: RuntimeAttachment) => ({ attachmentId: attachment.attachmentId, runtimeId: attachment.runtimeId, sessionId: attachment.sessionId, generation: attachment.generation, viewerId: attachment.viewerId, mode: attachment.mode, outputCursor: attachment.outputCursor.toString(), leaseExpiresAt: attachment.leaseExpiresAt, attachedAt: attachment.attachedAt, detachedAt: attachment.detachedAt });
 const toEvent = (event: RuntimeEvent) => ({ runtimeId: event.runtimeId, generation: event.generation, eventSeq: event.eventSeq, eventId: event.eventId, kind: event.kind, outputCursor: event.outputCursor?.toString() ?? null, messageId: event.messageId, outcome: event.outcome, payload: event.payload, occurredAt: event.occurredAt });
 
+export interface ProviderIdentityDiscoveryOptions {
+  /** Thread ids already owned by another live runtime, which this launch must not adopt. */
+  isClaimed?: (providerThreadId: string) => boolean;
+  /**
+   * Atomic claim for this runtime. When provided, a candidate is only returned
+   * after claim succeeds; a failed claim means another discoverer won that id
+   * and this poll continues looking for another session.
+   */
+  tryClaim?: (providerThreadId: string) => boolean;
+  /** Stops the poll early once the runtime this identity belongs to is no longer alive. */
+  keepPolling?: () => boolean;
+  timeoutMs?: number;
+  /**
+   * When set, only claim a transcript that contains this exact marker (the
+   * Rooms session id from the launch briefing). Concurrent same-cwd launches
+   * otherwise race newest-first discovery and can swap distinct transcripts.
+   */
+  ownershipMarker?: string;
+}
+
+/** Resolve aliases once so the provider process and transcript lookup share one cwd. */
+export function canonicalProviderCwd(cwd: string | undefined): string | undefined {
+  return cwd === undefined ? undefined : realpathSync.native(cwd);
+}
+
+/** Claude 2.1.x replaces every non-word path character with one hyphen. */
+export function claudeProjectKey(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
 /** Discover provider-native identity emitted by providers that persist a JSONL session transcript. */
-export async function discoverProviderThreadId(adapterKind: string | undefined, cwd: string | undefined, launchedAfter: number, homeDirectory = homedir()): Promise<string | null> {
-  if (!cwd || (adapterKind !== "claude" && adapterKind !== "codex")) return null;
-  const project = cwd.replace(/[^A-Za-z0-9_-]/g, (value) => value === "/" ? "-" : `-${value.charCodeAt(0).toString(16)}-`);
-  const directory = adapterKind === "claude"
-    ? join(homeDirectory, ".claude", "projects", project)
-    : join(homeDirectory, ".codex", "sessions");
-  // This poll is asynchronous relative to launch. Providers may spend several
-  // seconds initializing integrations before the first Rooms briefing creates
-  // their transcript, so keep the identity window generous without delaying
-  // the interactive wrapper.
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
+export async function discoverProviderThreadId(adapterKind: string | undefined, cwd: string | undefined, launchedAfter: number, homeDirectory = homedir(), options: ProviderIdentityDiscoveryOptions = {}): Promise<string | null> {
+  const isClaimed = options.isClaimed ?? (() => false);
+  const tryClaim = options.tryClaim;
+  const keepPolling = options.keepPolling ?? (() => true);
+  const ownershipMarker = typeof options.ownershipMarker === "string" && options.ownershipMarker.trim() !== ""
+    ? options.ownershipMarker
+    : null;
+  if (!cwd || (adapterKind !== "claude" && adapterKind !== "codex" && adapterKind !== "grok")) return null;
+  const providerCwd = canonicalProviderCwd(cwd)!;
+  // This poll is asynchronous relative to launch, so it never delays the
+  // interactive wrapper. A provider whose first briefing arrives minutes late
+  // still owns a real conversation, so it runs for as long as the runtime is
+  // alive rather than giving up on a fixed clock and leaving identity null.
+  const deadline = Date.now() + (options.timeoutMs ?? 15_000);
+  while (Date.now() < deadline && keepPolling()) {
     try {
-      const names = adapterKind === "codex"
-        ? readdirSync(directory, { recursive: true }).map(String)
-        : readdirSync(directory);
-      const candidates = names.filter(name => name.endsWith(".jsonl")).map(name => {
-        const path = join(directory, name);
-        try { const stat = statSync(path); return { path, created: stat.birthtimeMs || stat.mtimeMs }; } catch { return null; }
-      }).filter((value): value is { path: string; created: number } => value !== null && value.created >= launchedAfter - 1_000).sort((a, b) => b.created - a.created);
-      for (const candidate of candidates) {
-        const first = readFileSync(candidate.path, "utf8").split("\n", 1)[0];
-        try {
-          const record = JSON.parse(first) as { sessionId?: unknown; payload?: { id?: unknown; cwd?: unknown } };
-          const sessionId = adapterKind === "codex" ? record.payload?.id : record.sessionId;
-          const recordCwd: unknown = adapterKind === "codex" ? record.payload?.cwd : cwd;
-          if (recordCwd === cwd && typeof sessionId === "string" && sessionId.length > 0) return sessionId;
-        } catch { /* provider may still be writing its first record */ }
+      if (adapterKind === "grok") {
+        for (const sessionId of listGrokSessionCandidates(providerCwd, launchedAfter, homeDirectory)) {
+          if (isClaimed(sessionId)) continue;
+          if (ownershipMarker) {
+            const eventsPath = join(homeDirectory, ".grok", "sessions", encodeURIComponent(providerCwd), sessionId, "events.jsonl");
+            if (!fileContainsMarker(eventsPath, ownershipMarker)) continue;
+          }
+          if (tryClaim) {
+            if (tryClaim(sessionId)) return sessionId;
+            continue; // lost the atomic race; try the next candidate / poll
+          }
+          return sessionId;
+        }
+      } else {
+        const directory = adapterKind === "claude"
+          ? join(homeDirectory, ".claude", "projects", claudeProjectKey(providerCwd))
+          : join(homeDirectory, ".codex", "sessions");
+        const names = adapterKind === "codex"
+          ? readdirSync(directory, { recursive: true }).map(String)
+          : readdirSync(directory);
+        // Oldest-first when ownership is enforced so concurrent launches bind
+        // in creation order; newest-first remains the legacy single-launch path.
+        const candidates = names.filter(name => name.endsWith(".jsonl")).map(name => {
+          const path = join(directory, name);
+          try { const stat = statSync(path); return { path, created: stat.birthtimeMs || stat.mtimeMs }; } catch { return null; }
+        }).filter((value): value is { path: string; created: number } => value !== null && value.created >= launchedAfter - 1_000)
+          .sort((a, b) => ownershipMarker ? a.created - b.created : b.created - a.created);
+        for (const candidate of candidates) {
+          const first = readFileSync(candidate.path, "utf8").split("\n", 1)[0];
+          try {
+            const record = JSON.parse(first) as { sessionId?: unknown; payload?: { id?: unknown; cwd?: unknown } };
+            const sessionId = adapterKind === "codex" ? record.payload?.id : record.sessionId;
+            const recordCwd: unknown = adapterKind === "codex" ? record.payload?.cwd : providerCwd;
+            if (recordCwd !== providerCwd || typeof sessionId !== "string" || sessionId.length === 0 || isClaimed(sessionId)) continue;
+            if (ownershipMarker && !fileContainsMarker(candidate.path, ownershipMarker)) continue;
+            if (tryClaim) {
+              if (tryClaim(sessionId)) return sessionId;
+              continue;
+            }
+            return sessionId;
+          } catch { /* provider may still be writing its first record */ }
+        }
       }
     } catch { /* provider has not created its project directory yet */ }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   return null;
 }
+
+/** Read a bounded prefix so discovery can match a Rooms session id without loading huge transcripts. */
+export function fileContainsMarker(path: string, marker: string): boolean {
+  try {
+    const size = statSync(path).size;
+    if (size <= 0) return false;
+    const length = Math.min(size, 64 * 1024);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(path, "r");
+    try {
+      const read = readSync(fd, buffer, 0, length, 0);
+      return buffer.subarray(0, read).toString("utf8").includes(marker);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Grok Build stores lifecycle under ~/.grok/sessions/<encodeURIComponent(cwd)>/<sessionId>/events.jsonl.
+ * Candidates are newest-first for this cwd only — never a global cross-project newest file.
+ * Claiming is separate and must be atomic at the repository layer.
+ */
+function listGrokSessionCandidates(
+  cwd: string,
+  launchedAfter: number,
+  homeDirectory: string,
+): string[] {
+  const root = join(homeDirectory, ".grok", "sessions");
+  const encodedCwd = encodeURIComponent(cwd);
+  let names: string[] = [];
+  try {
+    names = readdirSync(root, { recursive: true }).map(String);
+  } catch {
+    return [];
+  }
+  const candidates = names
+    .filter((name) => name.endsWith("events.jsonl") || name.endsWith("/events.jsonl"))
+    .map((name) => {
+      const path = join(root, name);
+      try {
+        const stat = statSync(path);
+        return { path, name, created: stat.birthtimeMs || stat.mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is { path: string; name: string; created: number } =>
+      value !== null && value.created >= launchedAfter - 1_000)
+    .sort((a, b) => b.created - a.created);
+
+  const ids: string[] = [];
+  for (const candidate of candidates) {
+    // Path relative to sessions root: <encoded-cwd>/<sessionId>/events.jsonl
+    const parts = candidate.name.split(/[/\\]/).filter(Boolean);
+    if (parts.length < 3 || parts[parts.length - 1] !== "events.jsonl") continue;
+    const sessionId = parts[parts.length - 2]!;
+    const projectKey = parts[parts.length - 3]!;
+    // Prefer exact cwd match; Grok encodes cwd as the parent project key.
+    if (projectKey !== encodedCwd && projectKey !== cwd) continue;
+    if (!sessionId) continue;
+    ids.push(sessionId);
+  }
+  return ids;
+}
+
+/** Interactive providers can idle for minutes before a briefing creates their transcript. */
+const PROVIDER_IDENTITY_TIMEOUT_MS = 600_000;
 
 export interface RuntimeServiceOptions { machineId: string; defaultHomeAuthorityId: string; stateDir?: string; socketDirectory?: string; hostExecutable?: string; }
 export interface RuntimeAttachHandlers {
@@ -109,16 +245,37 @@ export class RoomsRuntimeService {
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
   }
 
+  quotaStatuses(machineId?: string): RuntimeQuotaStatus[] { return this.repository.quotaStatuses(machineId); }
+
+  setActiveRuntimeQuota(machineId: string, limit: number, actor: RuntimeActor): RuntimeQuotaStatus {
+    if (actor.role !== "operator") throw new RoomsStoreError("runtimeUnauthorized");
+    if (!machineId.trim() || !Number.isSafeInteger(limit) || limit < 1) throw new RoomsStoreError("invalidRuntimeQuota");
+    const current = this.repository.quota(machineId);
+    this.repository.setQuota({ machineId, maxActiveRuntimes: limit, maxObserversPerRuntime: current.maxObserversPerRuntime });
+    return this.repository.quotaStatuses(machineId)[0]!;
+  }
+
+  resetActiveRuntimeQuota(machineId: string, actor: RuntimeActor): RuntimeQuotaStatus {
+    if (actor.role !== "operator") throw new RoomsStoreError("runtimeUnauthorized");
+    if (!machineId.trim()) throw new RoomsStoreError("invalidRuntimeQuota");
+    this.repository.clearQuota(machineId);
+    return this.repository.quotaStatuses(machineId)[0]!;
+  }
+
   async create(request: RuntimeCreateRequest, actor: RuntimeActor): Promise<RuntimeResponse> {
-    if (actor.role !== "operator" && actor.sessionId !== request.sessionId) throw new RoomsStoreError("runtimeUnauthorized");
+    const plannerLaunch = actor.role === "planner"
+      && typeof request.channelId === "string"
+      && this.repository.plannerCanLaunchWorker(actor.sessionId, request.sessionId, request.channelId);
+    if (actor.role !== "operator" && actor.sessionId !== request.sessionId && !plannerLaunch) throw new RoomsStoreError("runtimeUnauthorized");
     const runtimeId = request.runtimeId ?? `runtime-${randomUUID()}`;
     const generation = request.generation ?? 1;
+    const launchCwd = canonicalProviderCwd(request.cwd);
     const reconnectSecret = randomBytes(32);
     const runtime = this.repository.create({ runtimeId, homeAuthorityId: request.homeAuthorityId || this.options.defaultHomeAuthorityId, sessionId: request.sessionId, generation, protocolVersion: request.protocolVersion ?? 1, transportKind: (request.transportKind ?? "localPty") as "localPty" | "structured", machineId: request.machineId ?? this.options.machineId, providerThreadId: request.providerThreadId ?? null, reconnectSecret });
     const stateDir = request.stateDir ?? this.options.stateDir;
     ensureRuntimeSocketDirectory(this.options.socketDirectory);
     const socketPath = runtimeSocketPath(runtime, this.options.socketDirectory);
-    const supervisor = new RuntimeHostSupervisor({ sessionId: runtime.sessionId, channelId: request.channelId, runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, generation: runtime.generation, stateDir, socketPath, executable: this.options.hostExecutable || undefined, shell: request.shell, command: request.command, cwd: request.cwd, secret: reconnectSecret, capabilityRenewal: true });
+    const supervisor = new RuntimeHostSupervisor({ sessionId: runtime.sessionId, channelId: request.channelId, runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, generation: runtime.generation, stateDir, socketPath, executable: this.options.hostExecutable || undefined, shell: request.shell, command: request.command, cwd: launchCwd, secret: reconnectSecret, capabilityRenewal: true });
     this.supervisors.set(runtimeId, supervisor);
     try {
       const launchedAt = Date.now();
@@ -132,11 +289,35 @@ export class RoomsRuntimeService {
         // after create returns: launch/attach is not delayed by a five-second
         // poll, and the newly-created transcript can still become durable
         // runtime/session identity for later native `--resume` recovery.
-        void discoverProviderThreadId(request.adapterKind, request.cwd, launchedAt)
+        // Claim is atomic inside tryClaimProviderThreadId so two concurrent
+        // same-cwd launches cannot both bind the newest unclaimed session.
+        void discoverProviderThreadId(request.adapterKind, launchCwd, launchedAt, undefined, {
+          timeoutMs: PROVIDER_IDENTITY_TIMEOUT_MS,
+          // Bind to this launch's Rooms session id once the briefing lands in
+          // the provider transcript, so concurrent same-cwd launches cannot
+          // swap each other's distinct conversation ids (internal work item).
+          ownershipMarker: request.sessionId,
+          // Another live runtime's conversation is never this runtime's identity,
+          // so a concurrent launch keeps waiting for its own transcript instead.
+          isClaimed: (candidate) => this.repository.providerThreadHolder(candidate, runtimeId) !== null,
+          tryClaim: (candidate) => this.repository.tryClaimProviderThreadId(runtimeId, candidate).claimed,
+          keepPolling: () => {
+            const current = this.repository.get(runtimeId);
+            return current !== null
+              && current.providerThreadId == null
+              && current.endedAt === null
+              && ["creating", "running", "recovering"].includes(current.state);
+          },
+        })
           .then((providerThreadId) => {
-            if (providerThreadId) this.repository.setProviderThreadId(runtimeId, providerThreadId);
+            // Successful discovery already claimed via tryClaim; gap only if none.
+            if (providerThreadId) return;
+            this.recordProviderIdentityGap(runtimeId, generation, "providerThreadIdUndiscovered");
           })
-          .catch(() => { /* unsupported providers and absent transcripts are optional */ });
+          // A launch that cannot verify its own provider identity says so on the
+          // runtime's event stream: silence is what made a null identity
+          // indistinguishable from a healthy session that simply started late.
+          .catch((error) => this.recordProviderIdentityGap(runtimeId, generation, error instanceof Error ? error.message : "providerThreadIdDiscoveryFailed"));
       }
       return { runtime: toRecord(current), binding: toBinding(binding) };
     } catch (error) {
@@ -146,7 +327,16 @@ export class RoomsRuntimeService {
     }
   }
 
-  list(request: RuntimeListRequest, actor: RuntimeActor): RuntimeListResponse { const runtimes = this.repository.list(request.machineId).filter((runtime) => actor.role === "operator" || runtime.sessionId === actor.sessionId); return { runtimes: runtimes.map(toRecord) }; }
+  private recordProviderIdentityGap(runtimeId: string, generation: number, reason: string): void {
+    const current = this.repository.get(runtimeId);
+    if (!current || current.providerThreadId) return;
+    try { this.repository.appendEvent({ runtimeId, generation, kind: "error", outcome: reason }); } catch { /* the runtime may already be gone */ }
+  }
+
+  list(request: RuntimeListRequest, actor: RuntimeActor): RuntimeListResponse {
+    const runtimes = this.repository.list(request.machineId).filter((runtime) => this.actorCanAccessRuntime(actor, runtime, "observe"));
+    return { runtimes: runtimes.map(toRecord) };
+  }
   resolveActiveSessionRuntime(sessionId: string, actor: RuntimeActor, action: RuntimeAction = "observe"): Runtime {
     const runtime = this.repository.list().filter((item) => item.sessionId === sessionId && !item.endedAt && ["running", "recovering"].includes(item.state)).sort((left, right) => right.generation - left.generation)[0];
     if (!runtime) throw new RoomsStoreError("runtimeNotFound");
@@ -380,6 +570,11 @@ export class RoomsRuntimeService {
   private authorizedRuntime(runtimeId: string, actor: RuntimeActor, generation?: number, action: RuntimeAction = "observe"): Runtime { const runtime = this.repository.get(runtimeId); if (!runtime) throw new RoomsStoreError("runtimeNotFound"); if (generation !== undefined && runtime.generation !== generation) throw new RoomsStoreError("staleRuntimeGeneration"); if (!this.actorCanAccessRuntime(actor, runtime, action)) throw new RoomsStoreError("runtimeUnauthorized"); return runtime; }
   private actorCanAccessRuntime(actor: RuntimeActor, runtime: Runtime, action: RuntimeAction): boolean {
     if (actor.role === "operator" || actor.sessionId === runtime.sessionId) return true;
+    // A channel planner that may launch a worker must also observe and tear it
+    // down through readiness and launch cleanup. Without this, planner-authorized
+    // session launch creates a live runtime then fails with "no active runtime"
+    // because list/attach only saw the planner's own session (internal work item).
+    if (actor.role === "planner" && this.plannerCanSuperviseWorkerRuntime(actor.sessionId, runtime, action)) return true;
     const capability = actor.capability;
     return Boolean(capability
       && capability.runtimeId === runtime.runtimeId
@@ -387,6 +582,13 @@ export class RoomsRuntimeService {
       && capability.sessionId === runtime.sessionId
       && capability.actions.includes(action)
       && Date.parse(capability.expiresAt) > Date.now());
+  }
+
+  private plannerCanSuperviseWorkerRuntime(plannerSessionId: string, runtime: Runtime, action: RuntimeAction): boolean {
+    if (action !== "observe" && action !== "attach" && action !== "terminate") return false;
+    const binding = this.repository.getBinding(runtime.runtimeId);
+    if (!binding?.channelId) return false;
+    return this.repository.plannerCanLaunchWorker(plannerSessionId, runtime.sessionId, binding.channelId);
   }
   private registerClient(attachment: RuntimeAttachment, runtime: Runtime, client: RuntimeHostClient): void { this.clients.set(attachment.attachmentId, client); client.on("output", (output) => { this.repository.appendEvent({ runtimeId: runtime.runtimeId, generation: runtime.generation, kind: "outputAvailable", outputCursor: output.cursor }); }); client.on("exit", (exit) => { this.repository.markState(runtime.runtimeId, runtime.generation, "exited", `exit:${exit.code}`); }); client.on("error", () => {}); client.on("close", () => { if (this.clients.get(attachment.attachmentId) === client) { this.clients.delete(attachment.attachmentId); this.controllerHellos.delete(attachment.attachmentId); } }); }
   private async ensureControllerClient(attachment: RuntimeAttachment, runtime: Runtime, supervisor: RuntimeHostSupervisor, cursor: bigint): Promise<{ client: RuntimeHostClient; hello: HostHelloAck }> {

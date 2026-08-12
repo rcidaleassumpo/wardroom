@@ -46,4 +46,14 @@ describe("native teardown fences", () => {
     await expect(adapter.stop({ conversationId: "conversation" }, { token: "forged", assertCurrent: async () => {} })).rejects.toThrow("stale teardown fence");
     expect(kill).not.toHaveBeenCalled();
   });
+
+  it("treats missing durable ownership as already stopped after mass terminate", async () => {
+    const kill = vi.fn();
+    const child = { pid: 46, exitCode: null, signalCode: null, kill };
+    const adapter = new CodexRuntimeAdapter((() => ({ process: child, runtimeId: "runtime-4" })) as any);
+    await adapter.launch({ channelId: "channel", priorSessionId: "prior", generation: 1, launch: { executable: "codex", args: ["exec", "prompt"], cwd: "/tmp" }, layout: { terminalColumns: null, terminalRows: null, layoutVersion: "1" }, adapterKind: "codex" });
+    (adapter as any).ownership.remove("prior", 1);
+    await expect(adapter.stopGeneration({ priorSessionId: "prior", generation: 1, fence: { token: "any", assertCurrent: async () => {} } })).resolves.toBeUndefined();
+    expect(kill).not.toHaveBeenCalled();
+  });
 });

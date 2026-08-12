@@ -19,6 +19,23 @@ const blueprint: ResumableChannelBlueprint = {
 const sqlitePath = (name: string): string => join(tmpdir(), `rooms-${name}-${randomUUID()}.sqlite`);
 
 describe("SQLite blueprint store", () => {
+  it("removes ended channel members and stale outcomes from the restore blueprint", () => {
+    const db = new DatabaseSync(":memory:"); migrate(db);
+    db.prepare("INSERT INTO channels(id, registered_at) VALUES (?, ?)").run("channel-id", "now");
+    const store = new SQLiteBlueprintStore(db);
+    const ended = { ...blueprint.members[0]!, priorSessionId: "ended-session", adapterKind: "claude" };
+    const current = { ...blueprint.members[0]!, priorSessionId: "current-session" };
+    const captured = { ...blueprint, members: [ended, current] };
+    db.prepare("INSERT INTO channel_blueprints(channel_id, blueprint_json, state, updated_at) VALUES (?, ?, 'suspended', ?)").run("channel-id", JSON.stringify(captured), "now");
+    db.prepare("INSERT INTO blueprint_member_outcomes(channel_id, prior_session_id, outcome, updated_at) VALUES (?, ?, 'stopped', ?), (?, ?, 'stopped', ?)").run("channel-id", "ended-session", "now", "channel-id", "current-session", "now");
+
+    const reconciled = store.retainMembers("channel-id", new Set(["current-session"]));
+
+    expect(reconciled?.members.map(member => member.priorSessionId)).toEqual(["current-session"]);
+    expect(db.prepare("SELECT prior_session_id FROM blueprint_member_outcomes WHERE channel_id=?").all("channel-id")).toEqual([{ prior_session_id: "current-session" }]);
+    db.close();
+  });
+
   it("persists opaque identity and atomically claims one resume lease", () => {
     const db = new DatabaseSync(":memory:"); migrate(db);
     const store = new SQLiteBlueprintStore(db);

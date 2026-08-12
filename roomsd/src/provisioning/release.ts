@@ -14,6 +14,13 @@ export const RELEASE_PROTOCOL_VERSION = releaseContract.protocolVersion;
 export const RELEASE_STORE_SCHEMA_VERSION = releaseContract.storeSchemaVersion;
 export const RELEASE_ARCHITECTURE = "darwin-arm64";
 export const RELEASE_FILES = ["rooms", "roomsd", "rooms-runtime-host"] as const;
+/**
+ * One macOS code identity per executable, fixed for the life of the product.
+ * macOS keys App Management, Full Disk Access and Automation on the designated
+ * requirement, so an identifier that moves with the build makes every installed
+ * release a different program and asks the operator to grant access again.
+ */
+export const RELEASE_CODE_IDENTIFIERS: Readonly<Record<string, string>> = releaseContract.codeIdentifiers;
 export type ReleaseSigningMode = "LOCAL_PROOF_ONLY" | "DEVELOPER_ID_NOTARIZED";
 export type ReleaseManifest = Readonly<{
   schemaVersion: 1;
@@ -30,8 +37,14 @@ export type ReleaseManifest = Readonly<{
     mode: ReleaseSigningMode;
     identity: string | null;
     teamIdentifier: string | null;
+    /** Legacy single requirement, kept for releases built before per-binary identity. */
     designatedRequirement: string | null;
     notarized: boolean;
+    /** Per-binary code identity, absent on releases built before this contract. */
+    identifiers?: Readonly<Record<string, string>>;
+    designatedRequirements?: Readonly<Record<string, string>>;
+    /** True only when every binary carries an identifier-anchored requirement. */
+    stableIdentity?: boolean;
   }>;
   files: Readonly<Record<string, Readonly<{ sha256: string; mode: "0755" }>>>;
 }>;
@@ -69,7 +82,66 @@ export function readReleaseManifest(directoryInput: string): ReleaseManifest {
     if (!file || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256) || file.mode !== "0755") throw new Error(`Rooms release checksum entry is invalid: ${name}`);
   }
   if (Object.keys(manifest.files).some(name => !(RELEASE_FILES as readonly string[]).includes(name))) throw new Error("Rooms release contains an unexpected file entry");
+  assertManifestCodeIdentity(manifest.signing);
   return manifest as ReleaseManifest;
+}
+
+/**
+ * Releases built before per-binary identity carry none of these fields and stay
+ * installable. A release that does claim them must claim this product's own
+ * identifiers, because a release naming a different identity for `roomsd` is the
+ * duplicate-App-Management defect arriving in manifest form.
+ */
+function assertManifestCodeIdentity(signing: ReleaseManifest["signing"]): void {
+  const { identifiers, designatedRequirements, stableIdentity } = signing;
+  if (identifiers === undefined && designatedRequirements === undefined && stableIdentity === undefined) return;
+  if (!identifiers || typeof identifiers !== "object" || Array.isArray(identifiers)) throw new Error("Rooms release code identifiers are invalid");
+  if (!designatedRequirements || typeof designatedRequirements !== "object" || Array.isArray(designatedRequirements)) throw new Error("Rooms release designated requirements are invalid");
+  if (typeof stableIdentity !== "boolean") throw new Error("Rooms release stable identity claim is invalid");
+  for (const name of RELEASE_FILES) {
+    const expected = RELEASE_CODE_IDENTIFIERS[name];
+    if (identifiers[name] !== expected) throw new Error(`Rooms release code identifier for ${name} must be ${expected}`);
+    if (typeof designatedRequirements[name] !== "string" || !designatedRequirements[name].trim()) throw new Error(`Rooms release designated requirement is missing for ${name}`);
+  }
+  for (const name of Object.keys(identifiers)) if (!(RELEASE_FILES as readonly string[]).includes(name)) throw new Error(`Rooms release code identifier names an unexpected binary: ${name}`);
+  if (stableIdentity !== RELEASE_FILES.every(name => isStableCodeIdentity(designatedRequirements[name], RELEASE_CODE_IDENTIFIERS[name]))) {
+    throw new Error("Rooms release stable identity claim does not match its designated requirements");
+  }
+}
+
+/**
+ * An ad-hoc signature has no designated requirement of its own, so `codesign`
+ * reports the implicit `cdhash H"…"` of that exact build. Only an
+ * identifier-anchored requirement survives a rebuild, and only that keeps one
+ * macOS authorization across installed releases.
+ */
+export function requirementIdentifier(requirement: string): string | null {
+  return /^identifier\s+("?)([^\s"]+)\1(?:\s+and\s[\s\S]+)?$/.exec(requirement.trim())?.[2] ?? null;
+}
+
+export function isStableCodeIdentity(requirement: string | null | undefined, expectedIdentifier: string): boolean {
+  return typeof requirement === "string" && requirementIdentifier(requirement) === expectedIdentifier;
+}
+
+/**
+ * macOS keys App Management and the other TCC grants on the designated
+ * requirement, so a release that changes it is a different program to the
+ * system: the operator is asked to grant access again and the old grant is
+ * stranded in System Settings. Refuse the swap instead of producing that.
+ */
+export function assertReleaseIdentityUnchanged(installed: ReleaseManifest, incoming: ReleaseManifest): void {
+  const before = installed.signing.designatedRequirements;
+  const after = incoming.signing.designatedRequirements;
+  if (!before || !after) return;
+  const changed = RELEASE_FILES.filter(name => before[name] !== after[name]);
+  if (!changed.length) return;
+  const adHoc = !incoming.signing.stableIdentity || !installed.signing.stableIdentity;
+  throw new Error(
+    `Rooms release ${incoming.version} does not carry the macOS code identity of the installed release ${installed.version} (${changed.join(", ")}); installing it would make macOS treat Rooms as a new program and ask for App Management again, leaving the old grant stranded in System Settings. ` +
+    (adHoc
+      ? "At least one of these releases is ad-hoc signed, which gives every build its own identity: rebuild with ROOMS_SIGNING_IDENTITY set to a code-signing certificate."
+      : "If this is a deliberate signing-certificate change, install it with --allow-identity-change and re-grant App Management once."),
+  );
 }
 
 export function verifyRelease(directoryInput: string, options: { allowQuarantine?: boolean } = {}): VerifiedRelease {
@@ -87,7 +159,7 @@ export function verifyRelease(directoryInput: string, options: { allowQuarantine
     if ((stat.mode & 0o777) !== 0o755) throw new Error(`Rooms release binary mode must be 755: ${name}`);
     const digest = sha256(path);
     if (digest !== manifest.files[name].sha256) throw new Error(`Rooms release checksum mismatch: ${name}`);
-    verifyCodeSignature(path, manifest.signing.mode, manifest.signing.teamIdentifier, manifest.signing.designatedRequirement);
+    verifyCodeSignature(path, name, manifest);
   }
   if (platform !== "darwin" || arch !== "arm64") throw new Error("Rooms provisioning targets native Apple Silicon macOS (darwin-arm64)");
   return { directory, manifest };
@@ -109,10 +181,14 @@ export function assertReleaseUpgradeCompatible(manifest: ReleaseManifest, storeP
   }
 }
 
-export function installRelease(releaseDirectory: string, options: { stateDir?: string; installRoot?: string } = {}): VerifiedRelease {
+export function installRelease(releaseDirectory: string, options: { stateDir?: string; installRoot?: string; allowIdentityChange?: boolean } = {}): VerifiedRelease {
   const verified = verifyRelease(releaseDirectory);
   const paths = roomsPaths(options.stateDir, options.installRoot);
   assertReleaseUpgradeCompatible(verified.manifest, paths.storePath);
+  if (!options.allowIdentityChange) {
+    const current = currentReleaseManifest(paths);
+    if (current) assertReleaseIdentityUnchanged(current, verified.manifest);
+  }
   ensureDirectory(paths.releaseRoot, 0o700);
   const destination = join(paths.releaseRoot, verified.manifest.version);
   if (isPresent(destination)) {
@@ -194,7 +270,8 @@ function atomicSymlink(link: string, target: string): void {
 function ensureDirectory(path: string, mode: number): void { mkdirSync(path, { recursive: true, mode }); chmodSync(path, mode); }
 function sha256(path: string): string { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
 
-function verifyCodeSignature(path: string, mode: ReleaseSigningMode, teamIdentifier: string | null, designatedRequirement: string | null): void {
+function verifyCodeSignature(path: string, name: string, manifest: ReleaseManifest): void {
+  const { mode, teamIdentifier, designatedRequirement, identifiers, designatedRequirements } = manifest.signing;
   try { execFileSync("codesign", ["--verify", "--strict", "--verbose=2", path], { stdio: "pipe" }); }
   catch { throw new Error(`Rooms release signature verification failed: ${path}`); }
   if (mode === "DEVELOPER_ID_NOTARIZED") {
@@ -203,19 +280,40 @@ function verifyCodeSignature(path: string, mode: ReleaseSigningMode, teamIdentif
   }
   const details = signatureDetails(path);
   if (teamIdentifier && details.teamIdentifier !== teamIdentifier) throw new Error(`Rooms release TeamIdentifier mismatch: ${path}`);
+  if (identifiers && designatedRequirements) {
+    if (details.identifier !== identifiers[name]) throw new Error(`Rooms release code identifier mismatch for ${name}: signed as ${details.identifier ?? "none"}, manifest claims ${identifiers[name]}`);
+    if (details.designatedRequirement !== designatedRequirements[name]) throw new Error(`Rooms release designated requirement mismatch: ${path}`);
+    return;
+  }
   if (designatedRequirement && details.designatedRequirement !== designatedRequirement) throw new Error(`Rooms release designated requirement mismatch: ${path}`);
 }
 
-function signatureDetails(path: string): { teamIdentifier: string | null; designatedRequirement: string | null } {
+/**
+ * `codesign -d -r-` prints an explicit requirement plainly and an ad-hoc build's
+ * implicit `cdhash` requirement as a comment. Read both, so an ad-hoc identity is
+ * recorded and compared rather than silently read as "no requirement".
+ */
+function signatureDetails(path: string): { identifier: string | null; teamIdentifier: string | null; designatedRequirement: string | null } {
   const verbose = spawnSync("codesign", ["-dvvv", path], { encoding: "utf8" });
   const requirements = spawnSync("codesign", ["-d", "-r-", path], { encoding: "utf8" });
   if (verbose.status !== 0 || requirements.status !== 0) throw new Error(`cannot inspect code signature: ${path}`);
-  return { teamIdentifier: /^TeamIdentifier=(.+)$/m.exec(`${verbose.stdout}\n${verbose.stderr}`)?.[1]?.trim() ?? null, designatedRequirement: /^designated => (.+)$/m.exec(`${requirements.stdout}\n${requirements.stderr}`)?.[1]?.trim() ?? null };
+  const described = `${verbose.stdout}\n${verbose.stderr}`;
+  return {
+    identifier: /^Identifier=(.+)$/m.exec(described)?.[1]?.trim() ?? null,
+    teamIdentifier: /^TeamIdentifier=(.+)$/m.exec(described)?.[1]?.trim() ?? null,
+    designatedRequirement: /^(?:#\s*)?designated => (.+)$/m.exec(`${requirements.stdout}\n${requirements.stderr}`)?.[1]?.trim() ?? null,
+  };
 }
 
 function hasQuarantine(path: string): boolean {
   try { execFileSync("xattr", ["-p", "com.apple.quarantine", path], { stdio: "pipe" }); return true; }
   catch { return false; }
+}
+
+/** The identity of what is live now, read without failing an install for an unrelated defect. */
+function currentReleaseManifest(paths: RoomsPaths): ReleaseManifest | null {
+  try { return isSymlinkToDirectory(paths.currentLink) ? readReleaseManifest(realpathSync(paths.currentLink)) : null; }
+  catch { return null; }
 }
 
 function isSymlinkToDirectory(path: string): boolean {

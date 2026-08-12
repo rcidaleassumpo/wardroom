@@ -82,6 +82,29 @@ describe("native Rooms runtime", () => {
     }
   });
 
+  it("reports and changes active runtime quotas only for operators", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-quota-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "operator", role: "operator" });
+      composition.database.insertSession({ id: "worker", role: "worker" });
+      const operatorConnection = { authenticatedSessionId: "operator", credentials: new Map([["operator-credential", "operator"]]), onClose: new Set() };
+      const workerConnection = { authenticatedSessionId: "worker", credentials: new Map([["worker-credential", "worker"]]), onClose: new Set() };
+
+      const initial = await composition.handler.runtimeQuotaGet!({ machineId: "quota-machine" });
+      expect(initial.quotas).toMatchObject([{ machineId: "quota-machine", source: "default", maxActiveRuntimes: 32, activeRuntimes: 0, availableRuntimes: 32 }]);
+      await expect(composition.handler.runtimeQuotaSet!({ machineId: "quota-machine", limit: 48, context: { credential: "worker-credential" }, __connection: workerConnection } as never)).rejects.toMatchObject({ code: "runtimeUnauthorized" });
+      const changed = await composition.handler.runtimeQuotaSet!({ machineId: "quota-machine", limit: 48, context: { credential: "operator-credential" }, __connection: operatorConnection } as never);
+      expect(changed.quota).toMatchObject({ machineId: "quota-machine", source: "override", maxActiveRuntimes: 48, activeRuntimes: 0, availableRuntimes: 48 });
+      const reset = await composition.handler.runtimeQuotaReset!({ machineId: "quota-machine", context: { credential: "operator-credential" }, __connection: operatorConnection } as never);
+      expect(reset.quota).toMatchObject({ machineId: "quota-machine", source: "default", maxActiveRuntimes: 32 });
+      composition.database.close();
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports partial broadcast delivery without blocking on a stale member", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-delivery-"));
     try {
@@ -161,6 +184,172 @@ describe("native Rooms runtime", () => {
       vi.spyOn(composition.runtimeService as any, "deliverMessage").mockResolvedValue({ ok: true, outcome: "accepted", bytesWritten: 5 });
       const result = await composition.handler.send({ senderSessionId: "sender", channelId: "proof", target: { kind: "broadcast" }, body: "hello", context: { credential: "credential" }, __connection: connection } as never) as any;
       expect(result.event.deliveredRecipientSessionIds).toEqual(["target"]);
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("delivers a direct message to a log-delivered participant without a runtime", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-log-direct-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "agent", role: "worker" });
+      composition.database.insertSession({ id: "ui-operator", role: "operator", deliveryMode: "log" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "ui-operator" });
+      composition.database.insertMembership("proof", "agent", "worker");
+      composition.database.insertMembership("proof", "ui-operator", "operator");
+      const connection = { authenticatedSessionId: "agent", credentials: new Map([["credential", "agent"]]), onClose: new Set() };
+      const result = await composition.handler.send({ senderSessionId: "agent", channelId: "proof", target: { kind: "direct", sessionId: "ui-operator" }, body: "hello", context: { credential: "credential" }, __connection: connection } as never) as any;
+      expect(result.event.recipientStatuses).toEqual({ "ui-operator": "delivered" });
+      expect(result.event.deliveredRecipientSessionIds).toEqual(["ui-operator"]);
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("accepts canonical reply input and exposes derived thread metadata through the message API", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-reply-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "agent", role: "worker" });
+      composition.database.insertSession({ id: "ui-operator", role: "operator", deliveryMode: "log" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "ui-operator" });
+      composition.database.insertMembership("proof", "agent", "worker");
+      composition.database.insertMembership("proof", "ui-operator", "operator");
+      const connection = { authenticatedSessionId: "agent", credentials: new Map([["credential", "agent"]]), onClose: new Set() };
+      const request = { senderSessionId: "agent", channelId: "proof", target: { kind: "direct", sessionId: "ui-operator" }, context: { credential: "credential" }, __connection: connection };
+      const root = await composition.handler.send({ ...request, body: "root" } as never) as any;
+      expect(await composition.handler.getThreadLifecycle({ threadRootEventId: root.event.id, channelId: "proof", ...request } as never))
+        .toMatchObject({ thread: { threadRootEventId: root.event.id, state: "open" } });
+      expect(await composition.handler.resolveThread({ threadRootEventId: root.event.id, channelId: "proof", ...request } as never))
+        .toMatchObject({ thread: { state: "resolved" } });
+      await expect(composition.handler.send({ ...request, body: "blocked reply", replyToEventId: root.event.id } as never))
+        .rejects.toMatchObject({ code: "threadResolved" });
+      expect(await composition.handler.reopenThread({ threadRootEventId: root.event.id, channelId: "proof", ...request } as never))
+        .toMatchObject({ thread: { state: "open" } });
+      const reply = await composition.handler.send({ ...request, body: "reply", replyToEventId: root.event.id } as never) as any;
+
+      expect(root.event).toMatchObject({ replyToEventId: null, threadRootEventId: null });
+      expect(reply.event).toMatchObject({
+        replyToEventId: root.event.id,
+        threadRootEventId: root.event.id,
+        correlation: { replyToEventId: root.event.id },
+      });
+      const history = await composition.handler.getEvents({ channelId: "proof", afterCursor: "0" });
+      expect(history.events.at(-1)).toMatchObject({ id: reply.event.id, replyToEventId: root.event.id, threadRootEventId: root.event.id });
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("accepts a broadcast whose only recipient is a log-delivered participant", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-log-broadcast-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "agent", role: "worker" });
+      composition.database.insertSession({ id: "ui-operator", role: "operator", deliveryMode: "log" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "ui-operator" });
+      composition.database.insertMembership("proof", "agent", "worker");
+      composition.database.insertMembership("proof", "ui-operator", "operator");
+      const connection = { authenticatedSessionId: "agent", credentials: new Map([["credential", "agent"]]), onClose: new Set() };
+      const result = await composition.handler.send({ senderSessionId: "agent", channelId: "proof", target: { kind: "broadcast" }, body: "done", context: { credential: "credential" }, __connection: connection } as never) as any;
+      expect(result.event.recipientStatuses).toEqual({ "ui-operator": "delivered" });
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("upgrades an existing session to log delivery on re-register", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-log-upgrade-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "ui-operator", role: "operator" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "ui-operator" });
+      composition.database.insertMembership("proof", "ui-operator", "operator");
+      expect(composition.database.currentSession("ui-operator")?.deliveryMode).toBe("runtime");
+      await composition.handler.registerSession({ channelId: "proof", sessionId: "ui-operator", role: "operator", deliveryMode: "log" } as never);
+      expect(composition.database.currentSession("ui-operator")?.deliveryMode).toBe("log");
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("blocks worker broadcasts on a privileged channel and names the alternative", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-policy-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      for (const [id, role] of [["operator", "operator"], ["planner", "planner"], ["worker", "worker"]] as const) composition.database.insertSession({ id, role, deliveryMode: id === "operator" ? "log" : "runtime" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "operator" });
+      for (const [id, role] of [["operator", "operator"], ["planner", "planner"], ["worker", "worker"]] as const) composition.database.insertMembership("proof", id, role);
+      const connectionFor = (id: string) => ({ authenticatedSessionId: id, credentials: new Map([["credential", id]]), onClose: new Set() });
+      const operatorContext = { context: { credential: "credential" }, __connection: connectionFor("operator") };
+      await composition.handler.updateChannelBroadcastPolicy!({ channelId: "proof", broadcastPolicy: "privileged", ...operatorContext } as never);
+      expect(composition.database.currentChannel("proof")?.broadcastPolicy).toBe("privileged");
+
+      await expect(composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "broadcast" }, body: "chatter", context: { credential: "credential" }, __connection: connectionFor("worker") } as never)).rejects.toMatchObject({ code: "broadcastRestricted" });
+
+      const fromPlanner = await composition.handler.send({ senderSessionId: "planner", channelId: "proof", target: { kind: "broadcast" }, body: "claim update", context: { credential: "credential" }, __connection: connectionFor("planner") } as never) as any;
+      expect(fromPlanner.event.recipientStatuses.operator).toBe("delivered");
+
+      // Direct sends stay open to everyone on a privileged channel.
+      const direct = await composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "direct", sessionId: "operator" }, body: "status", context: { credential: "credential" }, __connection: connectionFor("worker") } as never) as any;
+      expect(direct.event.recipientStatuses.operator).toBe("delivered");
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("accepts and deduplicates private control events from workers blocked from broadcast", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-control-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      for (const [id, role] of [["operator", "operator"], ["worker", "worker"]] as const) composition.database.insertSession({ id, role, deliveryMode: "log" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "operator" });
+      for (const [id, role] of [["operator", "operator"], ["worker", "worker"]] as const) composition.database.insertMembership("proof", id, role);
+      composition.database.updateChannelBroadcastPolicy("proof", "privileged");
+      const connection = { authenticatedSessionId: "worker", credentials: new Map([["credential", "worker"]]), onClose: new Set() };
+
+      await expect(composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "broadcast" }, body: "not allowed", context: { credential: "credential" }, __connection: connection } as never)).rejects.toMatchObject({ code: "broadcastRestricted" });
+      const request = { channelId: "proof", senderSessionId: "worker", kind: "example.task.claim", payload: { taskId: "task-1" }, requestId: "request-1", context: { credential: "credential" }, __connection: connection };
+      const first = await composition.handler.commitControl(request as never) as any;
+      const duplicate = await composition.handler.commitControl(request as never) as any;
+
+      expect(first.wasDeduplicated).toBe(false);
+      expect(first.event).toMatchObject({ channelId: "proof", senderSessionId: "worker", kind: "example.task.claim", payload: { taskId: "task-1" }, requestId: "request-1" });
+      expect(duplicate).toMatchObject({ wasDeduplicated: true, event: { id: first.event.id } });
+      expect(composition.database.replay("0", "proof").filter((change) => change.kind === "control.committed")).toHaveLength(1);
+      expect(composition.database.replay("0", "proof").filter((change) => change.kind === "message.sent")).toHaveLength(0);
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("lets only an operator change the broadcast policy", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-policy-auth-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "operator", role: "operator" });
+      composition.database.insertSession({ id: "worker", role: "worker" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "operator" });
+      composition.database.insertMembership("proof", "worker", "worker");
+      const connection = { authenticatedSessionId: "worker", credentials: new Map([["credential", "worker"]]), onClose: new Set() };
+      await expect(composition.handler.updateChannelBroadcastPolicy!({ channelId: "proof", broadcastPolicy: "privileged", context: { credential: "credential" }, __connection: connection } as never)).rejects.toMatchObject({ code: "unauthorized" });
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("lets a non-owner operator who is an active member change the broadcast policy", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-policy-member-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "retired-owner", role: "operator" });
+      composition.database.insertSession({ id: "ui-operator", role: "operator" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "retired-owner" });
+      composition.database.insertMembership("proof", "ui-operator", "operator");
+      const connection = { authenticatedSessionId: "ui-operator", credentials: new Map([["credential", "ui-operator"]]), onClose: new Set() };
+      await composition.handler.updateChannelBroadcastPolicy!({ channelId: "proof", broadcastPolicy: "privileged", context: { credential: "credential" }, __connection: connection } as never);
+      expect(composition.database.currentChannel("proof")?.broadcastPolicy).toBe("privileged");
       composition.database.close();
     } finally { rmSync(stateDir, { recursive: true, force: true }); }
   });

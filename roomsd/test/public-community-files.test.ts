@@ -38,6 +38,9 @@ describe("public contribution files", () => {
       ".github/ISSUE_TEMPLATE/2-feature-request.yml",
       ".github/ISSUE_TEMPLATE/3-protocol-design.yml",
       ".github/ISSUE_TEMPLATE/config.yml",
+      ".github/workflows/release.yml",
+      "roomsd/scripts/build-release.mjs",
+      "roomsd/scripts/package-distributions.mjs",
     ];
     if (exporter !== null) for (const path of paths) expect(exporter).toContain(`\"${path}\"`);
     for (const form of [bug, feature, protocol]) {

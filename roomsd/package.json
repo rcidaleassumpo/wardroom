@@ -19,7 +19,8 @@
     "release-contract.json"
   ],
   "bin": {
-    "rooms": "./dist/src/cli/main.js"
+    "rooms": "./dist/src/cli/main.js",
+    "rooms-mcp": "./dist/src/mcp/stdio.js"
   },
   "engines": {
     "node": ">=22"
@@ -33,10 +34,15 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@types/node": "^22.0.0",
     "esbuild": "^0.28.1",
     "postject": "^1.0.0-alpha.6",
     "typescript": "^5.7.0",
     "vitest": "^3.2.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
   }
 }

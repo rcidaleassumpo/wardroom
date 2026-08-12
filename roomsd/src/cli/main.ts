@@ -4,10 +4,11 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { CommitMessageInput, ListMessagesInput, RoomsCLIBackend, SendPromptInput, SessionCreateInput, SessionRegisterInput } from "./backend.js";
+import type { CommitMessageInput, ListMessagesInput, ListRepliesInput, RoomsCLIBackend, SendPromptInput, SessionCreateInput, SessionRegisterInput, ShowMessageInput } from "./backend.js";
 import { createDefaultRoomsCLIBackend } from "./default-backend.js";
 import { runRoomsSetup } from "./setup.js";
 import { runInteractiveRuntimeAttach } from "./runtime-attach.js";
+import { drainRuntimeOutput, waitForProviderReady } from "./runtime-drain.js";
 import type { AuthorityId } from "../identity/authority.js";
 import { loadFederationModule, requireFederationModule } from "../federation-loader.js";
 import { runRoomsDoctor } from "../provisioning/doctor.js";
@@ -18,9 +19,13 @@ import { roomsSkills, type RoomsSkillsCommand } from "./skills.js";
 import { runRoomsProvider } from "./provider-run.js";
 import { providerLaunchCommand } from "./codex-session-import.js";
 import { argsAlreadySetReasoningEffort, parseReasoningEffort, reasoningEffortArguments, type ReasoningEffort } from "./reasoning-effort.js";
+import { launchPermissionArguments, parseLaunchPermissionMode } from "./launch-permissions.js";
 import { applyCodexNakedProfile, listCodexSkills } from "./codex-minimal-profile.js";
-import { discoverProviders, listRegisteredProviders, providerName, registerProvider, registeredProviderExecutable, unregisterProvider, type RoomsProvider } from "./provider-registry.js";
+import { discoverProviders, inspectProvider, listRegisteredProviders, providerName, registerProvider, registeredProvider, removeProvider, updateProvider, type ProviderRegistrationInput, type RoomsProvider } from "./provider-registry.js";
+import { providerLaunchArguments, providerLaunchOptionsSchema, type ProviderLaunchOptions } from "./provider-launch-options.js";
 import { runRoomsService, type RoomsServiceCommand } from "../provisioning/launchd.js";
+import { formatRoomsVersion } from "../provisioning/version.js";
+import { runRoomsMcpStdio } from "../mcp/stdio.js";
 
 const VERSION = "0.1.0";
 
@@ -45,7 +50,7 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     return `${usage().split("\n").filter((line) => !federated(line)).join("\n")}\n`;
   }
   if (argv[0] === "--version" || argv[0] === "version") {
-    return `rooms ${VERSION}\nrelease=${process.env.ROOMS_RELEASE_VERSION ?? "installed-or-source"}\n`;
+    return formatRoomsVersion(VERSION);
   }
 
   const parsed = argv[0] === "run" && argv[1] ? parseProviderInvocation(argv) : parse(argv);
@@ -56,9 +61,11 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   if (scope === "provider" && command) {
     const stateDir = parsed.flags.get("state-dir");
     if (command === "discover") return formatResult(discoverProviders(stateDir));
-    if (command === "list") return formatResult({ providers: listRegisteredProviders(stateDir) });
-    if (command === "register" && name) return formatResult(registerProvider(providerName(name), parsed.flags.get("executable"), stateDir));
-    if (command === "unregister" && name) return formatResult(unregisterProvider(providerName(name), stateDir));
+    if (command === "list") return formatResult({ providers: listRegisteredProviders(stateDir).map(describeProvider) });
+    if (command === "inspect" && name) return formatResult(describeProvider(inspectProvider(providerName(name), stateDir)));
+    if (command === "register" && name) return formatResult(registerProvider(providerName(name), providerRegistrationInput(parsed.flags), stateDir));
+    if (command === "update" && name) return formatResult(updateProvider(providerName(name), providerRegistrationInput(parsed.flags), stateDir));
+    if ((command === "remove" || command === "unregister") && name) return formatResult(removeProvider(providerName(name), stateDir));
     throw new Error(`unknown provider command\n\n${usage()}`);
   }
   if (scope === "skills") {
@@ -69,8 +76,8 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   }
   if (scope === "machine" && command === "list") return formatResult((await requireFederationModule("rooms machine list")).listMachines(parsed.flags.get("state-dir")));
   if (scope === "machine" && command === "route" && name) return formatResult((await requireFederationModule("rooms machine route")).configureMachineRoute(name as AuthorityId, parsed.flags));
-  if (scope === "install") return formatResult(runRoomsInstall(parsed.flags.get("release-dir") ?? bundledReleaseDirectory(), provisioningOptions(parsed.flags)));
-  if (scope === "upgrade") return formatResult(runRoomsUpgrade(parsed.flags.get("release-dir") ?? bundledReleaseDirectory(), provisioningOptions(parsed.flags)));
+  if (scope === "install") return formatResult(runRoomsInstall(parsed.flags.get("release-dir") ?? bundledReleaseDirectory(), { ...provisioningOptions(parsed.flags), allowIdentityChange: parsed.flags.get("allow-identity-change") === "true" }));
+  if (scope === "upgrade") return formatResult(runRoomsUpgrade(parsed.flags.get("release-dir") ?? bundledReleaseDirectory(), { ...provisioningOptions(parsed.flags), allowIdentityChange: parsed.flags.get("allow-identity-change") === "true" }));
   if (scope === "rollback") return formatResult(runRoomsRollback(parsed.flags.get("version"), provisioningOptions(parsed.flags)));
   if (scope === "drain") return formatResult(runRoomsDrain(provisioningOptions(parsed.flags)));
   if (scope === "doctor") return formatResult(runRoomsDoctor(provisioningOptions(parsed.flags)));
@@ -105,25 +112,6 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     if (!federation.FEDERATION_CAPABILITY_COMMANDS.includes(name)) throw new Error(`unknown federation capability command\n\n${usage()}`);
     return formatResult(federation.runRoomsFederationCapabilityCommand(name, parsed.flags));
   }
-  const routedRemoteAttach = (scope === "session" || scope === "sessions") && command === "attach" && name
-    ? parseFederatedSessionTarget(name)
-    : undefined;
-  if (routedRemoteAttach && !parsed.flags.has("ssh-host") && !parsed.flags.has("peer-authority-id")) {
-    if (parsed.flags.has("json")) throw new Error("session attach is interactive and does not support --json");
-    const federation = await requireFederationModule("remote session attach");
-    const route = federation.readMachineRoute(routedRemoteAttach.authorityId, parsed.flags.get("local-state-dir"));
-    if (!route?.sshHost) throw new Error(`no Rooms machine route for ${routedRemoteAttach.authorityId}`);
-    await federation.runInteractiveRemoteRuntimeAttach({
-      sessionId: routedRemoteAttach.sessionId,
-      sshHost: route.sshHost,
-      peerAuthorityId: routedRemoteAttach.authorityId,
-      localStateDir: parsed.flags.get("local-state-dir"),
-      remoteStateDir: route.remoteStateDir ?? undefined,
-      mode: (parsed.flags.get("mode") ?? "controller") as "observe" | "controller",
-      outputCursor: parsed.flags.get("cursor") ?? "0",
-    });
-    return "";
-  }
   if ((scope === "session" || scope === "sessions") && command === "attach" && name && (parsed.flags.has("ssh-host") || parsed.flags.has("peer-authority-id"))) {
     if (parsed.flags.has("json")) throw new Error("session attach is interactive and does not support --json");
     const federation = await requireFederationModule("remote session attach");
@@ -143,35 +131,66 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     if (command === "codex" && parsed.flags.has("naked") && parsed.positionals[2] === "list-skills") {
       result = { lines: listCodexSkills().map(skill => `${skill.name}\t${skill.path}`) };
     } else if (parsed.flags.has("native")) result = await runRoomsProvider(command, [...parsed.positionals.slice(2), "--native"]);
-    else result = await runRoomsSession(command as "codex" | "claude" | "grok", parsed.positionals.slice(2), resolvedBackend, parsed.flags);
-  } else if (scope === "terminal" && command === "open") {
-    await runRoomsTerminal(resolvedBackend, parsed.flags);
-    return "";
+    else result = await runRoomsSession(providerName(command), parsed.positionals.slice(2), resolvedBackend, parsed.flags);
   } else if (scope === "shellenv") {
     const shellCommand = command ?? "print";
     if (!["install", "uninstall", "status", "print"].includes(shellCommand)) throw new Error(`unknown shellenv command\n\n${usage()}`);
     result = roomsShellenv(shellCommand as "install" | "uninstall" | "status" | "print", parsed.flags.get("shell") ?? "zsh", parsed.flags.get("state-dir"));
   } else if (scope === "briefing") {
     result = composeRoomsAgentBriefing({ sessionId: required(parsed.flags, "session"), channel: required(parsed.flags, "channel"), goal: parsed.flags.get("goal") ?? "", peers: parsed.flags.get("peers")?.split(",").filter(Boolean) });
+  } else if (scope === "mcp" && command === "serve" && name === undefined) {
+    runRoomsMcpStdio(resolvedBackend);
+    return "";
   } else if (scope === "channel" && command === "members" && name) {
     if (!resolvedBackend.channelMembers) throw new Error("channel roster support is unavailable");
     result = await resolvedBackend.channelMembers(name);
+  } else if (scope === "channel" && command === "state" && name) {
+    if (!resolvedBackend.channelStateSnapshots) throw new Error("channel state snapshot support is unavailable");
+    result = await resolvedBackend.channelStateSnapshots([name]);
+  } else if (scope === "channel" && command === "states") {
+    if (!resolvedBackend.channelStateSnapshots) throw new Error("channel state snapshot support is unavailable");
+    result = await resolvedBackend.channelStateSnapshots(jsonArray(required(parsed.flags, "channels-json")));
+  } else if ((scope === "channel" || scope === "session") && command === "usage" && name) {
+    if (!resolvedBackend.usageSeries) throw new Error("usage history support is unavailable");
+    result = await resolvedBackend.usageSeries(scope, name, parsed.flags.get("window") ?? "1h", booleanFlag(parsed.flags, "collect"));
   } else if (scope === "channel" && command === "send" && name) {
     if (!resolvedBackend.channelSend) throw new Error("channel messaging support is unavailable");
-    result = await resolvedBackend.channelSend({ channel: name, sender: process.env.ROOMS_SESSION_ID || "", body: required(parsed.flags, "body") });
+    const replyToEventId = optionalReplyTo(parsed.flags);
+    result = await resolvedBackend.channelSend({ channel: name, sender: process.env.ROOMS_SESSION_ID || "", body: required(parsed.flags, "body"), ...(replyToEventId ? { replyToEventId } : {}) });
+  } else if (scope === "control" && command === "commit") {
+    if (!resolvedBackend.commitControl) throw new Error("control commit support is unavailable");
+    result = await resolvedBackend.commitControl({
+      channel: parsed.flags.get("channel") ?? process.env.ROOMS_CHANNEL_ID ?? "",
+      sender: process.env.ROOMS_SESSION_ID || "",
+      kind: required(parsed.flags, "kind"),
+      payload: JSON.parse(required(parsed.flags, "payload-json")),
+      requestId: required(parsed.flags, "request-id"),
+    });
+  } else if (scope === "control" && command === "list") {
+    if (!resolvedBackend.listControls) throw new Error("control list support is unavailable");
+    result = await resolvedBackend.listControls({ channel: parsed.flags.get("channel") ?? process.env.ROOMS_CHANNEL_ID ?? "", sender: process.env.ROOMS_SESSION_ID || "", since: parsed.flags.get("since") ?? "0", limit: Number(parsed.flags.get("limit") ?? 100) });
   } else if ((scope === "session" || scope === "sessions") && command === "locate" && name) {
     const federation = await requireFederationModule("rooms session locate");
     result = await federation.locateSession(name, resolvedBackend, { stateDir: parsed.flags.get("state-dir"), includeEnded: booleanFlag(parsed.flags, "all") });
   } else if (scope === "session" && command === "send" && name) {
     if (!resolvedBackend.sessionSend) throw new Error("session messaging support is unavailable");
     try {
-      result = await resolvedBackend.sessionSend({ target: name, sender: process.env.ROOMS_SESSION_ID || "", body: required(parsed.flags, "body") });
+      const replyToEventId = optionalReplyTo(parsed.flags);
+      result = await resolvedBackend.sessionSend({ target: name, sender: process.env.ROOMS_SESSION_ID || "", body: required(parsed.flags, "body"), ...(replyToEventId ? { replyToEventId } : {}) });
     } catch (error) {
       if (!name.startsWith("federation:") && isUnknownRecipient(error)) {
         throw new Error(`unknown Rooms recipient session "${name}" on this machine; run \`rooms session locate ${name}\` to search registered machines, then resend to the returned target`);
       }
       throw error;
     }
+  } else if (scope === "session" && command === "end" && name) {
+    if (!resolvedBackend.endSession) throw new Error("session lifecycle support is unavailable");
+    const credential = required(parsed.flags, "credential");
+    if (resolvedBackend.runtimeTerminateSession) {
+      try { await resolvedBackend.runtimeTerminateSession(name, credential); }
+      catch (error) { if (!(error instanceof Error) || !/has no active Rooms runtime/.test(error.message)) throw error; }
+    }
+    result = await resolvedBackend.endSession(name, credential);
   } else if (scope === "channel" && command === "create" && name) {
     // Rooms stores no channel goal, so accepting --goal here would discard it
     // silently and leave the caller believing it was recorded.
@@ -187,6 +206,11 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
       normalizeChannelLabel(parsed.flags.get("label") ?? ""),
       parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "",
     );
+  } else if (scope === "channel" && command === "policy" && name) {
+    if (!resolvedBackend.setChannelBroadcastPolicy) throw new Error("channel policy support is unavailable");
+    const policy = parsed.flags.get("broadcast");
+    if (policy !== "all" && policy !== "privileged") throw new Error("rooms channel policy requires --broadcast all|privileged");
+    result = await resolvedBackend.setChannelBroadcastPolicy(name, policy, parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "");
   } else if (scope === "channel" && command === "status" && name) {
     result = await resolvedBackend.channelStatus(name);
   } else if (scope === "channel" && command === "suspend" && name) {
@@ -196,6 +220,25 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   } else if (scope === "channel" && command === "close" && name) {
     if (!resolvedBackend.closeChannel) throw new Error("channel closure support is unavailable");
     result = await resolvedBackend.closeChannel(name, parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "");
+  } else if (scope === "channel" && command === "archive" && name) {
+    if (!resolvedBackend.archiveChannel) throw new Error("channel archive support is unavailable");
+    result = await resolvedBackend.archiveChannel({
+      channel: name,
+      credential: parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "",
+      force: booleanFlag(parsed.flags, "force"),
+    });
+  } else if (scope === "thread" && command && name && ["show", "resolve", "reopen"].includes(command)) {
+    const input = { eventId: name, channel: parsed.flags.get("channel") ?? null, credential: parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "" };
+    if (command === "show") {
+      if (!resolvedBackend.threadLifecycle) throw new Error("thread lifecycle support is unavailable");
+      result = await resolvedBackend.threadLifecycle(input);
+    } else if (command === "resolve") {
+      if (!resolvedBackend.resolveThread) throw new Error("thread lifecycle support is unavailable");
+      result = await resolvedBackend.resolveThread(input);
+    } else {
+      if (!resolvedBackend.reopenThread) throw new Error("thread lifecycle support is unavailable");
+      result = await resolvedBackend.reopenThread(input);
+    }
   } else if (scope === "session" && command === "create") {
     const input: SessionCreateInput = {
       credential: required(parsed.flags, "credential"),
@@ -213,27 +256,46 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     const name = required(parsed.flags, "name");
     const channel = required(parsed.flags, "channel");
     const prompt = required(parsed.flags, "prompt");
+    const providerArgs = parsed.flags.has("provider-args-json") ? jsonArray(required(parsed.flags, "provider-args-json")) : [];
+    const options = launchOptions(parsed.flags);
+    const registration = backend ? undefined : registeredProvider(agent, parsed.flags.get("state-dir"));
+    const executable = resolvedBackend.providerExecutable?.(agent) ?? registration?.executable ?? agent;
+    const adapter = registration?.adapter ?? (agent === "gemini" ? "agy" : agent);
+    const translatedArgs = providerLaunchArguments(agent, adapter, options, registration?.defaults ?? {}, providerArgs);
     const input: SessionCreateInput = {
       credential: required(parsed.flags, "credential"),
       channel,
       name,
       agent,
+      adapter,
       role,
       cwd: parsed.flags.get("cwd") ?? process.cwd(),
       prompt,
-      command: [agent, ...withReasoningEffort(agent, parsed.flags.has("provider-args-json") ? jsonArray(required(parsed.flags, "provider-args-json")) : [], parsed.flags.get("effort"))],
+      command: [executable, ...translatedArgs],
     };
     let launched = false;
     try {
+      if (!resolvedBackend.registerSession) throw new Error("session launch requires channel membership support");
+      await resolvedBackend.registerSession({ channel, name: input.credential, role: "operator", externalId: null });
       result = await resolvedBackend.createSession(input);
       launched = true;
-      await new Promise(resolve => setTimeout(resolve, 1_000));
-      await resolvedBackend.sendPrompt({ channel, session: name, prompt });
-      result = { ...(result as Record<string, unknown>), promptDelivered: true };
+      const readiness = await awaitProviderReadiness(resolvedBackend, name, input.credential);
+      // Prefix the first prompt with the Rooms session id so concurrent
+      // same-cwd provider-thread discovery can claim only this launch's
+      // transcript (ownershipMarker in create() matches this exact line).
+      const launchPrompt = `You are a Rooms session ${name}.\n\n${prompt}`;
+      const delivery = await deliverLaunchPrompt(
+        resolvedBackend,
+        { credential: input.credential, channel, session: name, prompt: launchPrompt },
+        { timeoutMs: promptTimeoutMs(parsed.flags.get("prompt-timeout-ms")), verify: () => confirmProviderAccepted(resolvedBackend, name, input.credential, readiness?.cursor) },
+      );
+      result = { ...(result as Record<string, unknown>), promptDelivered: true, promptAccepted: delivery.verified, promptDeliveryAttempts: delivery.attempts, providerReady: readiness };
     } catch (error) {
       if (launched) {
-        try { await resolvedBackend.runtimeTerminateSession?.(name, name); } catch { /* preserve the launch error */ }
-        try { await resolvedBackend.endSession?.(name, name); } catch { /* preserve the launch error */ }
+        // Use the launch credential (operator or planner), not the worker session
+        // id, so cleanup is authorized the same way create was (internal work item).
+        try { await resolvedBackend.runtimeTerminateSession?.(name, input.credential); } catch { /* preserve the launch error */ }
+        try { await resolvedBackend.endSession?.(name, input.credential); } catch { /* preserve the launch error */ }
       }
       throw error;
     }
@@ -244,8 +306,23 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
       externalId: parsed.flags.get("external-id") ?? null,
     };
     if (!["operator", "planner", "worker", "reviewer"].includes(input.role)) throw new Error("invalid --role");
+    const deliveryFlag = parsed.flags.get("delivery");
+    if (deliveryFlag !== undefined) {
+      if (!["runtime", "log"].includes(deliveryFlag)) throw new Error("invalid --delivery: expected runtime or log");
+      input.deliveryMode = deliveryFlag as "runtime" | "log";
+    }
     if (!resolvedBackend.registerSession) throw new Error("session register is unavailable");
     result = await resolvedBackend.registerSession(input);
+  } else if (scope === "session" && command === "role" && name) {
+    const role = required(parsed.flags, "role") as "planner" | "worker" | "reviewer";
+    if (!["planner", "worker", "reviewer"].includes(role)) throw new Error("invalid --role: expected planner, worker, or reviewer");
+    if (!resolvedBackend.updateSessionRole) throw new Error("session role update is unavailable");
+    result = await resolvedBackend.updateSessionRole({
+      channel: required(parsed.flags, "channel"),
+      sessionId: name,
+      role,
+      credential: parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "",
+    });
   } else if (scope === "session" && command === "inspect" && name) {
     if (!resolvedBackend.inspectSession) throw new Error("session inspection is unavailable");
     result = await resolvedBackend.inspectSession(name);
@@ -258,28 +335,58 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     const input = await resolvedBackend.runtimeResolveSessionAttach(name, parsed.flags.get("credential") ?? name, (parsed.flags.get("mode") ?? "controller") as "observe" | "controller", parsed.flags.get("cursor"));
     await runInteractiveRuntimeAttach(input, resolvedBackend);
     return "";
+  } else if ((scope === "session" || scope === "sessions") && command === "observe" && name) {
+    // Observation is what attach cannot do without a terminal: read the
+    // provider's screen from a script, a supervisor, or a wedged-session
+    // diagnosis. It never writes, so it cannot disturb what it inspects.
+    if (!resolvedBackend.runtimeResolveSessionAttach || !resolvedBackend.runtimeAttachInteractive) throw new Error("session observation is unavailable");
+    const input = await resolvedBackend.runtimeResolveSessionAttach(name, parsed.flags.get("credential") ?? name, "observe", parsed.flags.get("cursor"));
+    result = await drainRuntimeOutput(input, resolvedBackend, {
+      durationMs: positiveMs(parsed.flags.get("duration-ms"), "--duration-ms"),
+      idleMs: positiveMs(parsed.flags.get("idle-ms"), "--idle-ms"),
+      plain: booleanFlag(parsed.flags, "plain"),
+    });
   } else if ((scope === "session" || scope === "sessions") && command === "terminate" && name) {
     if (!resolvedBackend.runtimeTerminateSession) throw new Error("session termination is unavailable");
     result = await resolvedBackend.runtimeTerminateSession(name, parsed.flags.get("credential") ?? name);
   } else if (scope === "message" && command === "commit") {
+    const replyToEventId = optionalReplyTo(parsed.flags);
     const input: CommitMessageInput = {
       channel: parsed.flags.get("channel") ?? null,
       sender: required(parsed.flags, "sender"),
       body: required(parsed.flags, "body"),
       target: parsed.flags.get("target") ?? null,
+      ...(replyToEventId ? { replyToEventId } : {}),
     };
     result = await resolvedBackend.commitMessage(input);
   } else if (scope === "message" && command === "list") {
+    const replyToEventId = optionalReplyTo(parsed.flags);
     const input: ListMessagesInput = {
       session: required(parsed.flags, "session"),
       since: parsed.flags.get("since") ?? "0",
       channel: parsed.flags.get("channel") ?? null,
       limit: boundedLimit(parsed.flags.get("limit")),
+      ...(replyToEventId ? { replyToEventId } : {}),
     };
     if (!resolvedBackend.listMessages) throw new Error("message list is unavailable");
     result = await resolvedBackend.listMessages(input);
+  } else if (scope === "message" && command === "show" && name) {
+    const input: ShowMessageInput = { eventId: name, channel: parsed.flags.get("channel") ?? null };
+    if (!resolvedBackend.showMessage) throw new Error("message inspection is unavailable");
+    result = await resolvedBackend.showMessage(input);
+  } else if (scope === "message" && command === "replies" && name) {
+    const input: ListRepliesInput = {
+      eventId: name,
+      session: parsed.flags.get("session"),
+      since: parsed.flags.get("since") ?? "0",
+      channel: parsed.flags.get("channel") ?? null,
+      limit: boundedLimit(parsed.flags.get("limit")),
+    };
+    if (!resolvedBackend.listReplies) throw new Error("message reply query is unavailable");
+    result = await resolvedBackend.listReplies(input);
   } else if (scope === "prompt" && command === "send") {
     const input: SendPromptInput = {
+      credential: required(parsed.flags, "credential"),
       channel: required(parsed.flags, "channel"),
       session: required(parsed.flags, "session"),
       prompt: required(parsed.flags, "prompt"),
@@ -291,6 +398,19 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   } else if (scope === "runtime" && command === "list") {
     if (!resolvedBackend.runtimeList) throw new Error("runtime support is unavailable");
     result = await resolvedBackend.runtimeList(required(parsed.flags, "credential"));
+  } else if (scope === "runtime" && command === "quota") {
+    if (!resolvedBackend.runtimeQuotaGet || !resolvedBackend.runtimeQuotaSet || !resolvedBackend.runtimeQuotaReset) throw new Error("runtime quota support is unavailable");
+    const action = name;
+    if (action === "set") {
+      const limit = Number(required(parsed.flags, "limit"));
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer");
+      result = await resolvedBackend.runtimeQuotaSet(required(parsed.flags, "machine"), limit, required(parsed.flags, "credential"));
+    } else if (action === "reset") {
+      result = await resolvedBackend.runtimeQuotaReset(required(parsed.flags, "machine"), required(parsed.flags, "credential"));
+    } else {
+      if (action) throw new Error(`unknown runtime quota action "${action}"`);
+      result = await resolvedBackend.runtimeQuotaGet(parsed.flags.get("machine"));
+    }
   } else if (scope === "runtime" && command === "status") {
     if (!resolvedBackend.runtimeStatus) throw new Error("runtime support is unavailable");
     result = await resolvedBackend.runtimeStatus(name ?? required(parsed.flags, "runtime-id"), required(parsed.flags, "credential"));
@@ -326,6 +446,21 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   } else if (scope === "runtime" && command === "events") {
     if (!resolvedBackend.runtimeEvents) throw new Error("runtime support is unavailable");
     result = await resolvedBackend.runtimeEvents(name ?? required(parsed.flags, "runtime-id"), Number(required(parsed.flags, "generation")), Number(parsed.flags.get("after") ?? "0"), required(parsed.flags, "credential"));
+  } else if (scope === "rotation" && command === "inspect") {
+    if (!resolvedBackend.rotationInspect) throw new Error("rotation support is unavailable");
+    result = await resolvedBackend.rotationInspect(required(parsed.flags, "channel"), required(parsed.flags, "session"), required(parsed.flags, "credential"));
+  } else if (scope === "rotation" && command === "prepare") {
+    if (!resolvedBackend.rotationPrepare) throw new Error("rotation support is unavailable");
+    result = await resolvedBackend.rotationPrepare(required(parsed.flags, "channel"), required(parsed.flags, "session"), required(parsed.flags, "credential"));
+  } else if (scope === "rotation" && command === "acknowledge") {
+    if (!resolvedBackend.rotationAcknowledge) throw new Error("rotation support is unavailable");
+    result = await resolvedBackend.rotationAcknowledge(required(parsed.flags, "rotation"), required(parsed.flags, "nonce"), required(parsed.flags, "credential"));
+  } else if (scope === "rotation" && command === "commit") {
+    if (!resolvedBackend.rotationCommit) throw new Error("rotation support is unavailable");
+    result = await resolvedBackend.rotationCommit(required(parsed.flags, "rotation"), required(parsed.flags, "credential"));
+  } else if (scope === "rotation" && command === "cancel") {
+    if (!resolvedBackend.rotationCancel) throw new Error("rotation support is unavailable");
+    result = await resolvedBackend.rotationCancel(required(parsed.flags, "rotation"), required(parsed.flags, "reason"), required(parsed.flags, "credential"));
   } else {
     throw new Error(`unknown command\n\n${usage()}`);
   }
@@ -335,6 +470,27 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
 
 function jsonValues(value: string): unknown[] { const parsed: unknown = JSON.parse(value); if (!Array.isArray(parsed)) throw new Error("expected a JSON array"); return parsed; }
 function jsonArray(value: string): string[] { const parsed = jsonValues(value); if (!parsed.every((item) => typeof item === "string")) throw new Error("expected a JSON string array"); return parsed as string[]; }
+function jsonObject(value: string): Record<string, unknown> { const parsed: unknown = JSON.parse(value); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("expected a JSON object"); return parsed as Record<string, unknown>; }
+
+function providerRegistrationInput(flags: Map<string, string>): ProviderRegistrationInput {
+  return {
+    ...(flags.has("executable") ? { executable: flags.get("executable") } : {}),
+    ...(flags.has("adapter") ? { adapter: flags.get("adapter") } : {}),
+    ...(flags.has("enabled") ? { enabled: booleanFlag(flags, "enabled") } : {}),
+    ...(flags.has("defaults-json") ? { defaults: jsonObject(required(flags, "defaults-json")) as ProviderRegistrationInput["defaults"] } : {}),
+  };
+}
+
+function describeProvider(registration: ReturnType<typeof inspectProvider>): unknown {
+  return { ...registration, launchOptions: providerLaunchOptionsSchema(registration.name) };
+}
+
+function launchOptions(flags: Map<string, string>): ProviderLaunchOptions {
+  const options = flags.has("provider-options-json") ? jsonObject(required(flags, "provider-options-json")) : {};
+  if (flags.has("permissions")) options.permissions = parseLaunchPermissionMode(required(flags, "permissions"));
+  if (flags.has("effort")) options.reasoningEffort = parseReasoningEffort(required(flags, "effort"));
+  return options;
+}
 
 async function main(argv: readonly string[]): Promise<void> {
   process.stdout.write(await runRoomsCLI(argv));
@@ -381,6 +537,7 @@ function parse(argv: readonly string[]): Parsed {
     }
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) {
+      if (token === "--reply-to" || token === "--reply-to-event") throw new Error(`${token} requires an event id`);
       flags.set(token.slice(2), "true");
       continue;
     }
@@ -398,7 +555,7 @@ function parse(argv: readonly string[]): Parsed {
 export function parseProviderInvocation(argv: readonly string[]): Parsed {
   const positionals = [argv[0]!, argv[1]!];
   const flags = new Map<string, string>();
-  const valueFlags = new Set(["credential", "channel", "name", "prompt", "cwd", "goal", "role", "effort"]);
+  const valueFlags = new Set(["credential", "channel", "name", "prompt", "cwd", "goal", "role", "effort", "permissions", "provider-options-json", "state-dir"]);
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index]!;
     // Everything after a bare `--` belongs to the provider verbatim, so a
@@ -435,6 +592,15 @@ function required(flags: Map<string, string>, name: string): string {
   return value;
 }
 
+function optionalReplyTo(flags: ReadonlyMap<string, string>): string | undefined {
+  const replyTo = flags.get("reply-to")?.trim();
+  const replyToEvent = flags.get("reply-to-event")?.trim();
+  if (flags.has("reply-to") && !replyTo) throw new Error("--reply-to requires an event id");
+  if (flags.has("reply-to-event") && !replyToEvent) throw new Error("--reply-to-event requires an event id");
+  if (replyTo && replyToEvent && replyTo !== replyToEvent) throw new Error("--reply-to and --reply-to-event must name the same event");
+  return replyTo ?? replyToEvent;
+}
+
 export const DEFAULT_MESSAGE_LIST_LIMIT = 50;
 
 export function boundedLimit(value: string | undefined, fallback = DEFAULT_MESSAGE_LIST_LIMIT): number {
@@ -457,11 +623,6 @@ export function booleanFlag(flags: Map<string, string>, name: string): boolean {
   throw new Error(`--${name} is a boolean flag; pass --${name}, --${name} true, or --${name} false`);
 }
 
-/** Resolve an npm or Homebrew bin symlink back to its complete Rooms release. */
-export function bundledReleaseDirectory(executablePath = process.execPath): string {
-  return dirname(realpathSync(executablePath));
-}
-
 function provisioningOptions(flags: Map<string, string>): { stateDir?: string; installRoot?: string } {
   return { stateDir: flags.get("state-dir"), installRoot: flags.get("install-root") };
 }
@@ -469,7 +630,7 @@ function provisioningOptions(flags: Map<string, string>): { stateDir?: string; i
 
 function codexAgent(value: string): RoomsProvider { return providerName(value); }
 
-async function runRoomsSession(provider: "codex" | "claude" | "grok", args: readonly string[], backend: RoomsCLIBackend, flags: Map<string, string>): Promise<string> {
+async function runRoomsSession(provider: RoomsProvider, args: readonly string[], backend: RoomsCLIBackend, flags: Map<string, string>): Promise<string> {
   if (!backend.registerSession || !backend.createSession || !backend.runtimeResolveSessionAttach || !backend.runtimeAttachInteractive) throw new Error("Rooms interactive launch support is unavailable");
   let channel = flags.get("channel") ?? process.env.ROOMS_CHANNEL_ID;
   let credential = flags.get("credential") ?? process.env.ROOMS_OPERATOR_CREDENTIAL;
@@ -498,10 +659,11 @@ async function runRoomsSession(provider: "codex" | "claude" | "grok", args: read
     createdChannel = true;
   }
   await backend.registerSession({ channel, name: session, role: (flags.get("role") ?? "worker") as "operator" | "planner" | "worker" | "reviewer", externalId: null });
-  const providerArgs = providerArguments(provider, args, flags);
-  const executable = registeredProviderExecutable(provider, flags.get("state-dir"));
+  const registration = registeredProvider(provider, flags.get("state-dir"));
+  const providerArgs = providerLaunchArguments(provider, registration.adapter, launchOptions(flags), registration.defaults, providerArguments(provider, args, flags));
+  const executable = registration.executable;
   const command = providerLaunchCommand(provider, providerArgs, resumeThreadId, undefined, executable);
-  await backend.createSession({ credential, channel, name: session, agent: provider, cwd: flags.get("cwd") ?? process.cwd(), prompt, command, providerThreadId: resumeThreadId ?? null });
+  await backend.createSession({ credential, channel, name: session, agent: provider, adapter: registration.adapter, cwd: flags.get("cwd") ?? process.cwd(), prompt, command, providerThreadId: resumeThreadId ?? null });
   const briefingReadyAt = Date.now() + 1_000;
   const roster = backend.channelMembers
     ? await backend.channelMembers(channel, credential) as { members?: Array<{ sessionId?: string; id?: string; displayName?: string | null; name?: string | null }> }
@@ -518,6 +680,7 @@ async function runRoomsSession(provider: "codex" | "claude" | "grok", args: read
     const briefingDelay = briefingReadyAt - Date.now();
     if (briefingDelay > 0) await new Promise(resolve => setTimeout(resolve, briefingDelay));
     await backend.sendPrompt({
+      credential,
       channel,
       session,
       prompt: composeRoomsAgentBriefing({ sessionId: session, channel, goal, peers }),
@@ -536,70 +699,7 @@ async function runRoomsSession(provider: "codex" | "claude" | "grok", args: read
   return "";
 }
 
-/**
- * Create and attach one provider-free shell runtime. Detaching the CLI leaves
- * the session and runtime alive; a real shell exit ends the session and closes
- * a channel created by this invocation.
- */
-async function runRoomsTerminal(backend: RoomsCLIBackend, flags: Map<string, string>): Promise<void> {
-  if (!backend.registerSession || !backend.runtimeCreate || !backend.runtimeResolveSessionAttach || !backend.runtimeAttachInteractive) {
-    throw new Error("Rooms terminal support is unavailable");
-  }
-  const channel = required(flags, "channel");
-  const session = flags.get("name") ?? createSessionId();
-  let credential = flags.get("credential") ?? process.env.ROOMS_OPERATOR_CREDENTIAL;
-  if (!credential && backend.listSessions) {
-    const listed = await backend.listSessions({ includeEnded: false }) as { sessions?: Array<{ id?: string; role?: string; endedAt?: string | null }> };
-    credential = listed.sessions?.find((item) => item.role === "operator" && item.endedAt == null)?.id;
-  }
-  if (!credential) throw new Error("Rooms terminal creation requires an active Rooms operator; set ROOMS_OPERATOR_CREDENTIAL or register an operator session");
-
-  const createChannel = booleanFlag(flags, "create-channel");
-  let channelCreated = false;
-  let sessionRegistered = false;
-  let runtimeCreated = false;
-  try {
-    if (createChannel) {
-      await backend.createChannel({ name: channel, credential });
-      channelCreated = true;
-    }
-    await backend.registerSession({ channel, name: session, role: "operator", externalId: null });
-    sessionRegistered = true;
-    const shell = flags.get("shell") ?? process.env.SHELL ?? "/bin/sh";
-    await backend.runtimeCreate({
-      credential: session,
-      sessionId: session,
-      channelId: channel,
-      shell,
-      // A normal terminal starts a login shell so macOS path_helper and the
-      // user's profile establish Homebrew and other interactive tooling.
-      command: [shell, "-l"],
-      cwd: flags.get("cwd") ?? process.cwd(),
-      adapterKind: "shell",
-      providerThreadId: null,
-    });
-    runtimeCreated = true;
-  } catch (error) {
-    if (runtimeCreated) {
-      try { await backend.runtimeTerminateSession?.(session, session); } catch { /* preserve the creation error */ }
-    }
-    if (sessionRegistered) {
-      try { await backend.endSession?.(session, session); } catch { /* preserve the creation error */ }
-    }
-    if (channelCreated) {
-      try { await backend.closeChannel?.(channel, credential); } catch { /* preserve the creation error */ }
-    }
-    throw error;
-  }
-
-  const attach = await backend.runtimeResolveSessionAttach(session, session, "controller");
-  const attached = await runInteractiveRuntimeAttach(attach, backend);
-  if (!attached.exited) return;
-  if (backend.endSession) await backend.endSession(session, session);
-  if (channelCreated && backend.closeChannel) await backend.closeChannel(channel, credential);
-}
-
-export function providerResumeThreadId(provider: "codex" | "claude" | "grok", args: readonly string[]): string | undefined {
+export function providerResumeThreadId(provider: RoomsProvider, args: readonly string[]): string | undefined {
   if (provider === "claude") {
     const index = args.indexOf("--resume");
     const value = index >= 0 ? args[index + 1] : args.find(item => item.startsWith("--resume="))?.slice("--resume=".length);
@@ -618,7 +718,7 @@ export function roomsLaunchPrompt(flags: ReadonlyMap<string, string>): string {
   return flags.get("prompt") ?? flags.get("goal") ?? "";
 }
 
-function providerArguments(_provider: "codex" | "claude" | "grok", args: readonly string[], _flags: Map<string, string>): string[] {
+function providerArguments(_provider: RoomsProvider, args: readonly string[], _flags: Map<string, string>): string[] {
   const base = _provider === "codex" && _flags.get("naked") === "true" ? applyCodexNakedProfile(args) : [...args];
   return withReasoningEffort(_provider, base, _flags.get("effort"));
 }
@@ -629,12 +729,118 @@ function providerArguments(_provider: "codex" | "claude" | "grok", args: readonl
  * theirs, and a provider that cannot honor it fails closed rather than silently
  * running at its default.
  */
-export function withReasoningEffort(provider: "codex" | "claude" | "grok", args: readonly string[], requested: string | undefined): string[] {
+export function withReasoningEffort(provider: RoomsProvider, args: readonly string[], requested: string | undefined): string[] {
   if (requested === undefined) return [...args];
   const effort: ReasoningEffort = parseReasoningEffort(requested);
   const forwarded = reasoningEffortArguments(provider, effort);
   if (argsAlreadySetReasoningEffort(provider, args)) return [...args];
   return [...forwarded, ...args];
+}
+
+/**
+ * A freshly created runtime is not ready to receive the moment createSession
+ * returns: the provider process still has to boot its TUI before Rooms can
+ * write into it. The old launch slept a flat second and then reported
+ * promptDelivered whatever happened, so a slow provider silently lost its first
+ * prompt and the session sat idle forever (internal work item).
+ *
+ * Delivery is therefore attempted immediately and retried until Rooms has
+ * evidence the runtime took the prompt, or the deadline passes and the launch
+ * fails outright. A backend that reports no per-recipient status cannot be
+ * second-guessed, so an unreported status counts as accepted; a reported one
+ * that is not "delivered" does not.
+ */
+export async function deliverLaunchPrompt(
+  backend: Pick<RoomsCLIBackend, "sendPrompt">,
+  input: SendPromptInput,
+  options: { timeoutMs?: number; sleep?: (ms: number) => Promise<void>; verify?: () => Promise<boolean> } = {},
+): Promise<{ attempts: number; verified: boolean }> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
+  const deadline = Date.now() + timeoutMs;
+  const backoffMs = [250, 500, 1_000, 2_000];
+  let attempts = 0;
+  let lastFailure = "the runtime never accepted the prompt";
+  while (true) {
+    attempts += 1;
+    try {
+      const status = promptDeliveryStatus(await backend.sendPrompt(input), input.session);
+      if (status === undefined || status === "delivered") {
+        if (!options.verify) return { attempts, verified: false };
+        if (await options.verify()) return { attempts, verified: true };
+        lastFailure = "the runtime took the prompt but the provider never acted on it";
+      } else {
+        lastFailure = `the runtime reported delivery status "${status}"`;
+      }
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+    const wait = backoffMs[Math.min(attempts - 1, backoffMs.length - 1)]!;
+    if (Date.now() + wait >= deadline) {
+      throw new Error(`session ${input.session} launched but its first prompt was never delivered after ${attempts} attempts: ${lastFailure}`);
+    }
+    await sleep(wait);
+  }
+}
+
+/**
+ * Wait for the launched provider to finish drawing before writing its prompt.
+ * A backend without observation support keeps the previous behavior rather than
+ * failing the launch, which is what the CLI test doubles exercise.
+ */
+async function awaitProviderReadiness(backend: RoomsCLIBackend, session: string, credential: string): Promise<{ settled: boolean; byteCount: number; cursor: string } | null> {
+  if (!backend.runtimeResolveSessionAttach || !backend.runtimeAttachInteractive) return null;
+  return waitForProviderReady(await backend.runtimeResolveSessionAttach(session, credential, "observe"), backend);
+}
+
+/**
+ * Provider acceptance, as distinct from runtime acceptance. Writing the prompt
+ * into the PTY proves only that the bytes landed; a provider that took the
+ * prompt starts working and its screen keeps changing, while one that dropped
+ * it goes quiet. Near-silence after delivery is therefore the signal that the
+ * prompt was written but never submitted.
+ */
+async function confirmProviderAccepted(backend: RoomsCLIBackend, session: string, credential: string, cursor: string | undefined): Promise<boolean> {
+  if (!backend.runtimeResolveSessionAttach || !backend.runtimeAttachInteractive || cursor === undefined) return true;
+  try {
+    // Replaying from the pre-delivery cursor is the whole point: counting the
+    // boot paint again would call every launch accepted.
+    const input = await backend.runtimeResolveSessionAttach(session, credential, "observe", cursor);
+    const drained = await drainRuntimeOutput(input, backend, { durationMs: 8_000, idleMs: 3_000, awaitFirstOutput: true, minBytes: PROVIDER_ACTIVITY_BYTES });
+    return drained.byteCount >= PROVIDER_ACTIVITY_BYTES;
+  } catch {
+    return true; // an unobservable runtime is not evidence of a lost prompt
+  }
+}
+
+/** Output a provider produces when it is actually working on a prompt. */
+const PROVIDER_ACTIVITY_BYTES = 400;
+
+/** A millisecond window flag, rejected rather than silently coerced. */
+function positiveMs(value: string | undefined, flag: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${flag} must be a positive integer`);
+  return parsed;
+}
+
+/** How long a launch waits for the provider to boot far enough to take its prompt. */
+function promptTimeoutMs(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("--prompt-timeout-ms must be a non-negative integer");
+  return parsed;
+}
+
+/** The recipient's delivery status in a send result, when the backend reports one. */
+function promptDeliveryStatus(result: unknown, session: string): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const event = (result as { event?: unknown }).event;
+  const carrier = (event && typeof event === "object" ? event : result) as { recipientStatuses?: unknown };
+  const statuses = carrier.recipientStatuses;
+  if (!statuses || typeof statuses !== "object") return undefined;
+  const status = (statuses as Record<string, unknown>)[session];
+  return typeof status === "string" ? status : undefined;
 }
 
 function formatResult(value: unknown): string {
@@ -655,20 +861,26 @@ function usage(): string {
     "Usage:",
     "  rooms whoami",
     "  rooms shellenv install|uninstall|status|print [--shell zsh]",
-    "  rooms skills install|uninstall|status|print [--provider codex|claude|grok] [--state-dir <absolute-path>]",
+    "  rooms skills install|uninstall|status|print [--provider codex|claude|grok|gemini] [--state-dir <absolute-path>]",
     "  rooms provider discover|list [--state-dir <absolute-path>]",
-    "  rooms provider register <codex|claude|grok> [--executable <absolute-path>] [--state-dir <absolute-path>]",
-    "  rooms provider unregister <codex|claude|grok> [--state-dir <absolute-path>]",
+    "  rooms provider inspect <codex|claude|grok|gemini> [--state-dir <absolute-path>]",
+    "  rooms provider register|update <codex|claude|grok|gemini> [--executable <absolute-path>] [--adapter <name>] [--enabled true|false] [--defaults-json <object>] [--state-dir <absolute-path>]",
+    "  rooms provider remove <codex|claude|grok|gemini> [--state-dir <absolute-path>]",
     "  rooms machine list [--state-dir <absolute-path>]",
     "  rooms machine route <authority-id> --ssh-host <host> [--remote-state-dir <absolute-path>] [--state-dir <absolute-path>]",
     "  rooms machine route <authority-id> --remove [--state-dir <absolute-path>]",
     "  rooms machine inspect [authority-id] [--all] [--ssh-host <host>] [--state-dir <absolute-path>] [--remote-state-dir <absolute-path>]",
-    "  rooms run <codex|claude|grok> [--native] [--effort low|medium|high] [provider arguments...]",
+    "  rooms run <codex|claude|grok|gemini> [--native] [--provider-options-json <object>] [provider arguments...]",
     "  rooms briefing --session <session-id> --channel <channel> [--goal <text>] [--peers <id,...>]",
+    "  rooms control commit --channel <channel> --kind <kind> --payload-json <json> --request-id <id>",
+    "  rooms control list --channel <channel> [--since <cursor>] [--limit <count>]",
+    "  rooms session usage <session-id> [--window 15m|1h|6h|24h|7d] [--collect true|false]",
+    "  rooms channel usage <channel-id> [--window 15m|1h|6h|24h|7d] [--collect true|false]",
+    "  rooms mcp serve",
     "  rooms setup [--state-dir <absolute-path>]",
     "  rooms setup status [--state-dir <absolute-path>]",
-    "  rooms install [--release-dir <absolute-path>] [--state-dir <absolute-path>] [--install-root <absolute-path>]",
-    "  rooms upgrade [--release-dir <absolute-path>] [--state-dir <absolute-path>] [--install-root <absolute-path>]",
+    "  rooms install [--release-dir <absolute-path>] [--state-dir <absolute-path>] [--install-root <absolute-path>] [--allow-identity-change]",
+    "  rooms upgrade [--release-dir <absolute-path>] [--state-dir <absolute-path>] [--install-root <absolute-path>] [--allow-identity-change]",
     "  rooms rollback [--version <version>] [--state-dir <absolute-path>] [--install-root <absolute-path>]",
     "  rooms drain [--state-dir <absolute-path>] [--install-root <absolute-path>]",
     "  rooms doctor [--state-dir <absolute-path>] [--install-root <absolute-path>]",
@@ -690,39 +902,53 @@ function usage(): string {
     "  rooms federation channel revoke-admission --credential <owner-session-or-token> --peer-authority-id <peer> --channel <channel> [--state-dir <path>]",
     "  rooms federation channel admissions --credential <owner-session-or-token> --channel <channel> [--state-dir <path>]",
     "  rooms federation channel register --ssh-host <host> --peer-authority-id <channel-home-authority> --session <local-session> --channel <channel>",
-    "  rooms federation channel direct-send --ssh-host <host> --peer-authority-id <channel-home-authority> --session <local-session> --target-session <home-session> --body <text>",
-    "  rooms federation channel send --ssh-host <host> --peer-authority-id <channel-home-authority> --session <local-session> --channel <channel> --body <text>",
+    "  rooms federation channel direct-send --ssh-host <host> --peer-authority-id <channel-home-authority> --session <local-session> --target-session <home-session> --body <text> [--reply-to <event-id>]",
+    "  rooms federation channel send --ssh-host <host> --peer-authority-id <channel-home-authority> --session <local-session> --channel <channel> --body <text> [--reply-to <event-id>]",
     "  rooms federation channel snapshot|messages|leave --ssh-host <host> --peer-authority-id <channel-home-authority> --session <local-session> --channel <channel> [--after-cursor <n>]",
     "  rooms federation capability issue --credential <token> --session <home-session> --peer-authority-id <audience> --out <path> [--mode observe|controller] [--ttl-seconds <n>] [--state-dir <path>]",
     "  rooms channel create <name> [--credential <operator-session-or-token>]",
     "  rooms channel list",
     "  rooms channel label <name> --label <text> [--credential <operator-session-or-token>]   (empty label clears)",
+    "  rooms channel policy <name> --broadcast all|privileged [--credential <operator-session-or-token>]   (privileged: only operator and planner may broadcast)",
     "  rooms channel members <name>",
-    "  rooms channel send <name> --body <text>",
+    "  rooms channel state <name>",
+    "  rooms channel states --channels-json <json-array>",
+    "  rooms channel send <name> --body <text> [--reply-to <event-id>]",
     "  rooms channel status <name>",
     "  rooms channel suspend <name>",
+    "  rooms channel archive <name> [--credential <operator-session>] [--force]",
+    "  rooms thread show|resolve|reopen <thread-root-event-id> [--channel <name>] [--credential <session>]",
     "  rooms channel resume <name>",
     "  rooms channel close <name> [--credential <operator-session-or-token>]",
     "  rooms session create --credential <token> --channel <name> --name <name> --agent codex --prompt <text> [--cwd <path>]",
-    "  rooms session launch --credential <token> --channel <name> --name <name> --agent codex|claude|grok --role planner|worker|reviewer --prompt <text> [--cwd <path>] [--effort low|medium|high] [--provider-args-json <json-array>]",
-    "  rooms session register --channel <name> --name <name> [--role operator|planner|worker|reviewer] [--external-id <id>]",
+    "  rooms session launch --credential <token> --channel <name> --name <name> --agent codex|claude|grok|gemini --role planner|worker|reviewer --prompt <text> [--cwd <path>] [--provider-options-json <object>] [--prompt-timeout-ms <n>] [--provider-args-json <json-array>]",
+    "  rooms session register --channel <name> --name <name> [--role operator|planner|worker|reviewer] [--external-id <id>] [--delivery runtime|log]",
+    "  rooms session role <session-id> --channel <name> --role planner|worker|reviewer --credential <operator-session-or-token>",
     "  rooms session attach <session-id> [--credential <token>] [--mode observe|controller] [--cursor <n>]",
-    "  rooms session attach federation:<home-authority>:<session-id> [--mode observe|controller] [--cursor <n>]",
     "  rooms session attach <remote-session-id> --ssh-host <host> --peer-authority-id <home-authority> --capability-file <path> [--mode observe|controller] [--cursor <n>]",
-    "  rooms terminal open --channel <name> [--name <session-id>] [--create-channel] [--credential <operator-session-or-token>] [--shell <path>] [--cwd <path>]",
     "  rooms sessions attach <session-id> ...  (plural alias)",
+    "  rooms session observe <session-id> [--credential <token>] [--cursor <n>] [--duration-ms <n>] [--idle-ms <n>] [--plain]",
     "  rooms session inspect <session-id>",
     "  rooms session list [--all]   (--all, --all true, or --all false)",
     "  rooms session locate <session-id> [--all] [--state-dir <absolute-path>]",
-    "  rooms session send <session-id> --body <text>",
-    "  rooms message commit --sender <session> --body <text> [--channel <name>] [--target <session>]",
-    "  rooms message list --session <session> [--since <cursor>] [--limit <1-500>] [--channel <name>] [--json]",
-    "  rooms prompt send --channel <name> --session <session> --prompt <text>",
+    "  rooms session send <session-id> --body <text> [--reply-to <event-id>]",
+    "  rooms session end <session-id> --credential <operator-session-or-token>",
+    "  rooms message commit --sender <session> --body <text> [--channel <name>] [--target <session>] [--reply-to <event-id>]",
+    "  rooms message list --session <session> [--reply-to <event-id>] [--since <cursor>] [--limit <1-500>] [--channel <name>] [--json]",
+    "  rooms message show <event-id> [--channel <name>] [--json]",
+    "  rooms message replies <event-id> [--session <session>] [--since <cursor>] [--limit <1-500>] [--channel <name>] [--json]",
+    "  rooms prompt send --credential <token> --channel <name> --session <session> --prompt <text>",
     "  rooms runtime create --credential <token> --session <session> [--runtime-id <id>] [--home-authority-id <id>] [--provider-thread-id <id>] [--shell <path>] [--state-dir <path>]",
     "  rooms runtime list|status|detach|events ... --credential <token>",
+    "  rooms runtime quota [--machine <machine-id>]",
+    "  rooms runtime quota set --machine <machine-id> --limit <n> --credential <operator-session-or-token>",
+    "  rooms runtime quota reset --machine <machine-id> --credential <operator-session-or-token>",
     "  rooms runtime attach <runtime-id> --credential <token> --home-authority-id <id> --session <id> --generation <n> --viewer-id <id> [--mode observe|controller] [--cursor <n>]",
     "  rooms runtime input|resize|signal ... --credential <token> --attachment-id <id>",
     "  rooms runtime terminate|recover|deliver-message ... --credential <token>",
+    "  rooms rotation inspect|prepare --channel <channel> --session <worker> --credential <planner>",
+    "  rooms rotation acknowledge --rotation <id> --nonce <nonce> --credential <worker>",
+    "  rooms rotation commit|cancel --rotation <id> --credential <planner> [--reason <text>]",
     "",
     "Environment:",
     "  ROOMS_CLI_BACKEND_MODULE  optional backend module override",
@@ -737,14 +963,13 @@ function normalizeChannelLabel(input: string): string | null {
   return label;
 }
 
-function isUnknownRecipient(error: unknown): boolean {
-  return error instanceof Error && /unknown Rooms recipient session/.test(error.message);
+/** Resolve an npm or Homebrew executable link back to its complete release. */
+export function bundledReleaseDirectory(executablePath = process.execPath): string {
+  return dirname(realpathSync(executablePath));
 }
 
-function parseFederatedSessionTarget(value: string): { authorityId: AuthorityId; sessionId: string } | undefined {
-  const match = /^federation:(authority-[0-9a-f]{64}):(.+)$/.exec(value);
-  if (!match) return undefined;
-  return { authorityId: match[1] as AuthorityId, sessionId: match[2]! };
+function isUnknownRecipient(error: unknown): boolean {
+  return error instanceof Error && /unknown Rooms recipient session/.test(error.message);
 }
 
 function isDirectRun(): boolean {

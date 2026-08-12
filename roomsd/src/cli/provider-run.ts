@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-const PROVIDERS = new Set(["codex", "claude", "grok"]);
+const PROVIDERS = new Set(["codex", "claude", "grok", "gemini"]);
 
 export async function runRoomsProvider(provider: string, args: readonly string[]): Promise<number> {
   if (!PROVIDERS.has(provider)) throw new Error(`unsupported Rooms provider: ${provider}`);

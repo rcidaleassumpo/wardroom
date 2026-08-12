@@ -90,6 +90,16 @@ export interface RuntimeQuota {
   updatedAt: string;
 }
 
+export interface RuntimeQuotaStatus extends RuntimeQuota {
+  source: "default" | "override";
+  activeRuntimes: number;
+  availableRuntimes: number;
+  runtimeCount: number;
+  utilizationPercent: number;
+  capacityState: "healthy" | "warning" | "exhausted";
+  states: Readonly<Record<RuntimeState, number>>;
+}
+
 export interface CreateRuntimeInput {
   runtimeId: string;
   homeAuthorityId: string;

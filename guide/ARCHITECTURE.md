@@ -51,14 +51,15 @@ There are three intended delivery paths:
 2. Headless drivers that resume durable provider conversations.
 3. An MCP server for agents that ask Wardroom for work.
 
-The live runtime and Codex driver exist. Broader driver coverage and MCP remain
-future work.
+The live runtime and MCP server exist. Codex and Claude support managed launch
+and conversation resume. Grok supports managed launch but not conversation
+resume.
 
-## Public v0.1 boundary
+## Public v0.2.1 boundary
 
-Public v0.1 runs on one machine. Federation and remote terminal attach are
-omitted from this export and require a separate security review before a later
-release.
+Public v0.2.1 runs on one machine. The source keeps federation behind a neutral
+loader, but the release build disables federation and remote terminal attach.
+Enabling either in a later release needs a separate security review.
 
 ## Source and release boundary
 
@@ -69,6 +70,6 @@ their own release evidence.
 
 ## Current platform boundary
 
-The TypeScript daemon and CLI run in Linux CI. The Go PTY host has a Darwin
-adapter and is macOS-only in v0.1. Linux PTY hosting requires a native adapter
-before it can be claimed or distributed.
+The TypeScript daemon, CLI, and Go PTY host run in Linux and macOS CI. Wardroom
+v0.2.1 publishes only Apple Silicon macOS executables; it does not yet publish a
+Linux release.

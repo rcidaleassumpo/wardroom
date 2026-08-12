@@ -46,11 +46,12 @@ describe("public README", () => {
   });
 
   it("states the federation, platform, distribution, and license scope", () => {
-    expect(readme).toContain("Wardroom v0.1 is single-machine only");
-    expect(readme).toContain("Federation is omitted from this public");
+    expect(readme).toContain("Wardroom v0.2.1 is single-machine only");
+    expect(readme).toContain("the public release binary disables it");
     expect(readme).toContain("brew install rcidaleassumpo/tap/wardroom");
-    expect(readme).toContain("npm install --global wardroom");
+    expect(readme).toContain("unsigned community build");
     expect(readme).toContain("Apple Silicon macOS release");
+    expect(readme).toContain("`rooms mcp serve`");
     expect(readme).toContain("Wardroom is licensed under [Apache License 2.0](LICENSE)");
   });
 

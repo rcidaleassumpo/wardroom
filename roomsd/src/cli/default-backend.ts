@@ -2,12 +2,14 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import type { RoomsCLIBackend, ChannelCreateInput, CommitMessageInput, ListMessagesInput, SendPromptInput, SessionCreateInput, SessionRegisterInput, SessionListInput, RuntimeCLIInput, RuntimeAttachCLIInput, RuntimeAttachInteractiveHandlers, RuntimeInputCLIInput, RuntimeResizeCLIInput, RuntimeSignalCLIInput, RuntimeTerminateCLIInput, RuntimeRecoverCLIInput, RuntimeDeliverCLIInput } from "./backend.js";
+import type { RoomsCLIBackend, ArchiveChannelInput, ChannelCreateInput, CommitMessageInput, ListMessagesInput, ListRepliesInput, SendPromptInput, SessionCreateInput, SessionRegisterInput, SessionListInput, ShowMessageInput, ThreadLifecycleInput, RuntimeCLIInput, RuntimeAttachCLIInput, RuntimeAttachInteractiveHandlers, RuntimeInputCLIInput, RuntimeResizeCLIInput, RuntimeSignalCLIInput, RuntimeTerminateCLIInput, RuntimeRecoverCLIInput, RuntimeDeliverCLIInput } from "./backend.js";
 import { RoomsRepository } from "../storage/repository.js";
 import { storeSchemaVersion } from "../storage/migrations.js";
 import { SQLiteBlueprintStore, SQLiteRuntimeOwnershipStore } from "../storage/blueprint-repository.js";
-import { DurableChannelLifecycle, type CanonicalDeliveryPort, type CanonicalMemberReattachmentPort } from "../lifecycle/suspend-resume.js";
+import { DurableChannelLifecycle, type CanonicalDeliveryPort, type CanonicalMemberReattachmentPort, type RuntimeGenerationPort } from "../lifecycle/suspend-resume.js";
+import { archiveChannelLifecycle } from "../lifecycle/archive-channel.js";
 import { createCodexAdapters } from "../runtime/codex-adapter.js";
+import { listRegisteredProviders } from "./provider-registry.js";
 import type { ResumableChannelBlueprint, ResumableMemberBlueprint } from "../blueprints/resumable.js";
 import type { RuntimeActor } from "../runtime/contracts.js";
 import { assertAbsolutePath, roomsPaths, type RoomsPaths } from "../provisioning/paths.js";
@@ -17,6 +19,7 @@ import { RoomsDaemonRuntimeClient } from "./daemon-runtime-client.js";
 import { stampRoomsProvenance } from "../domain/message-provenance.js";
 import { requireFederationModule } from "../federation-loader.js";
 import type { AuthorityId } from "../identity/authority.js";
+import { registeredProviderExecutable } from "./provider-registry.js";
 
 const isoNow = () => new Date().toISOString();
 
@@ -31,13 +34,74 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
   // Explicit legacy drain-only boundary: suspend/resume teardown keeps the
   // historical adapter until its migration unit is complete. New sessions
   // below never launch through this adapter.
-  const legacyDrainOnlyAdapters = createCodexAdapters(blueprintStore, { runtimeOwnership: ownership });
+  const providerRegistrations = listRegisteredProviders(paths.stateDir)
+    .filter((provider): provider is typeof provider & { name: "codex" | "claude" | "grok" } =>
+      provider.name === "codex" || provider.name === "claude" || provider.name === "grok");
+  const legacyDrainOnlyAdapters = createCodexAdapters(blueprintStore, { runtimeOwnership: ownership, providerRegistrations });
   const canonical = new SQLiteCanonicalMembers(repository);
-  const delivery: CanonicalDeliveryPort = { deliver: async () => true };
-  const lifecycle = new DurableChannelLifecycle(blueprintStore, legacyDrainOnlyAdapters.runtime, legacyDrainOnlyAdapters.provider, delivery, canonical);
   const daemonRuntime = new RoomsDaemonRuntimeClient(paths.endpoint, () => daemonUnavailableReason(paths, storePath));
+  const lifecycleRuntime: RuntimeGenerationPort = {
+    activeGenerations(input) {
+      if (input.length === 0) return new Set<string>();
+      const tuplePlaceholders = input.map(() => "(?, ?)").join(", ");
+      const parameters = input.flatMap(member => [member.priorSessionId, member.generation]);
+      const rows = repository.db.prepare(`SELECT DISTINCT session_id, generation FROM runtimes WHERE ended_at IS NULL AND state IN ('creating','running','recovering','terminating') AND (session_id, generation) IN (${tuplePlaceholders})`).all(...parameters) as Array<{ session_id: string; generation: number }>;
+      return new Set(rows.map(row => `${row.session_id}:${Number(row.generation)}`));
+    },
+    async launch(input) {
+      const actor = runtimeActor(repository, currentRoomsSession(repository));
+      const member = blueprintStore.read(input.channelId)?.members.find(item => item.priorSessionId === input.priorSessionId);
+      const launched = await daemonRuntime.callAs(actor.sessionId, "runtimeCreate", {
+        homeAuthorityId,
+        sessionId: input.priorSessionId,
+        generation: input.generation,
+        channelId: input.channelId,
+        adapterKind: input.adapterKind,
+        providerThreadId: member?.provider?.conversationId ?? null,
+        cwd: input.launch.cwd,
+        command: [input.launch.executable, ...input.launch.args],
+      }) as { runtime?: { runtimeId?: string; sessionId?: string; providerThreadId?: string | null } };
+      const runtime = launched.runtime;
+      if (!runtime?.runtimeId) throw new Error("resumed runtime did not return an identity");
+      const providerThreadId = runtime.providerThreadId ?? member?.provider?.conversationId ?? null;
+      if (providerThreadId && member) {
+        repository.setSessionProviderThreadId(input.priorSessionId, providerThreadId);
+        canonical.ensureBlueprint(input.channelId, input.channelId, {
+          ...member,
+          processGeneration: input.generation,
+          provider: {
+            conversationId: providerThreadId,
+            resumeDescriptor: {
+              ...(typeof member.provider?.resumeDescriptor === "object" && member.provider.resumeDescriptor ? member.provider.resumeDescriptor as Record<string, unknown> : {}),
+              provider: member.adapterKind,
+              mode: "runtime",
+              cwd: member.launch.cwd,
+            },
+          },
+        });
+      }
+      return { sessionId: runtime.sessionId ?? input.priorSessionId, runtimeId: runtime.runtimeId };
+    },
+    async stop(input) {
+      const actor = runtimeActor(repository, currentRoomsSession(repository));
+      const row = repository.db.prepare("SELECT generation, state, ended_at FROM runtimes WHERE runtime_id=?").get(input.runtimeId) as { generation?: number; state?: string; ended_at?: string | null } | undefined;
+      if (!row || row.ended_at || ["exited", "terminated"].includes(row.state ?? "")) return;
+      await daemonRuntime.callAs(actor.sessionId, "runtimeTerminate", { runtimeId: input.runtimeId, generation: Number(row.generation) });
+    },
+    async stopGeneration(input) {
+      const actor = runtimeActor(repository, currentRoomsSession(repository));
+      const row = repository.db.prepare("SELECT runtime_id, state, ended_at FROM runtimes WHERE session_id=? AND generation=? ORDER BY created_at DESC LIMIT 1").get(input.priorSessionId, input.generation) as { runtime_id?: string; state?: string; ended_at?: string | null } | undefined;
+      if (!row || row.ended_at || ["exited", "terminated"].includes(row.state ?? "")) return;
+      await daemonRuntime.callAs(actor.sessionId, "runtimeTerminate", { runtimeId: row.runtime_id, generation: input.generation });
+    },
+  };
+  const delivery: CanonicalDeliveryPort = { deliver: async () => true };
+  const lifecycle = new DurableChannelLifecycle(blueprintStore, lifecycleRuntime, legacyDrainOnlyAdapters.provider, delivery, canonical);
 
   return {
+    providerExecutable(name) {
+      return registeredProviderExecutable(name, paths.stateDir);
+    },
     async whoami() {
       return resolveRoomsIdentity(repository, process.env, homeAuthorityId);
     },
@@ -57,6 +121,12 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       return daemonRuntime.callAs(actor.sessionId, "updateChannelLabel", { channelId: name, label });
     },
 
+    async setChannelBroadcastPolicy(name: string, policy: "all" | "privileged", credential: string) {
+      const actor = runtimeActor(repository, credential);
+      if (actor.role !== "operator") throw new Error("channel broadcast policy requires an operator credential");
+      return daemonRuntime.callAs(actor.sessionId, "updateChannelBroadcastPolicy", { channelId: name, broadcastPolicy: policy });
+    },
+
     async channelMembers(name: string, credential?: string) {
       const sender = credential
         ? runtimeActor(repository, credential).sessionId
@@ -65,15 +135,48 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       return { channel: name, members: roster.roster ?? [] };
     },
 
+    async channelStateSnapshots(channelIds: string[]) {
+      return daemonRuntime.call("channelStateSnapshots", { channelIds });
+    },
+
+    async usageSeries(scope: "session" | "channel", id: string, window: string, collect: boolean) {
+      return daemonRuntime.callAs(currentRoomsSession(repository), "usageSeries", { scope, id, window, collect });
+    },
+
     async channelSend(input) {
       const sender = input.sender || currentRoomsSession(repository);
-      return daemonRuntime.callAs(sender, "send", { channelId: input.channel, senderSessionId: sender, body: stampRoomsProvenance(sender, input.body), target: { kind: "broadcast", sessionIds: [] } });
+      return daemonRuntime.callAs(sender, "send", { channelId: input.channel, senderSessionId: sender, body: stampRoomsProvenance(sender, input.body), target: { kind: "broadcast", sessionIds: [] }, replyToEventId: input.replyToEventId });
+    },
+
+    async commitControl(input) {
+      const sender = input.sender || currentRoomsSession(repository);
+      return daemonRuntime.callAs(sender, "commitControl", { channelId: input.channel, senderSessionId: sender, kind: input.kind, payload: input.payload, requestId: input.requestId });
+    },
+    async listControls(input) {
+      const sender = input.sender || currentRoomsSession(repository);
+      return daemonRuntime.callAs(sender, "getControls", { channelId: input.channel, afterCursor: input.since, limit: input.limit });
+    },
+
+    async threadLifecycle(input: ThreadLifecycleInput) {
+      const actor = runtimeActor(repository, input.credential || currentRoomsSession(repository));
+      return daemonRuntime.callAs(actor.sessionId, "getThreadLifecycle", { threadRootEventId: input.eventId, channelId: input.channel });
+    },
+
+    async resolveThread(input: ThreadLifecycleInput) {
+      const actor = runtimeActor(repository, input.credential || currentRoomsSession(repository));
+      return daemonRuntime.callAs(actor.sessionId, "resolveThread", { threadRootEventId: input.eventId, channelId: input.channel });
+    },
+
+    async reopenThread(input: ThreadLifecycleInput) {
+      const actor = runtimeActor(repository, input.credential || currentRoomsSession(repository));
+      return daemonRuntime.callAs(actor.sessionId, "reopenThread", { threadRootEventId: input.eventId, channelId: input.channel });
     },
 
     async sessionSend(input) {
       const sender = input.sender || currentRoomsSession(repository);
       const federated = parseFederatedSessionTarget(input.target);
       if (federated) {
+        if (input.replyToEventId) throw new Error("structured replies to federated direct messages are unavailable because the parent event belongs to another Rooms authority");
         const federation = await requireFederationModule("federated session send");
         const route = federation.readMachineRoute(federated.authorityId, paths.stateDir);
         const peer = federation.readActivePeerTrust(federated.authorityId, paths.stateDir);
@@ -86,12 +189,13 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
           ["body", input.body],
           ["local-state-dir", paths.stateDir],
         ]);
+        if (input.replyToEventId) flags.set("reply-to-event", input.replyToEventId);
         if (route?.remoteStateDir) flags.set("remote-state-dir", route.remoteStateDir);
         return federation.runRoomsFederationChannelCommand("direct-send", flags);
       }
       const body = stampRoomsProvenance(sender, input.body);
       const channelId = resolveRoomsIdentity(repository, process.env, homeAuthorityId).channelId;
-      const result = await daemonRuntime.callAs(sender, "send", { channelId, senderSessionId: sender, body, target: { kind: "direct", sessionId: input.target, sessionIds: [input.target] } }) as Record<string, unknown>;
+      const result = await daemonRuntime.callAs(sender, "send", { channelId, senderSessionId: sender, body, target: { kind: "direct", sessionId: input.target, sessionIds: [input.target] }, replyToEventId: input.replyToEventId }) as Record<string, unknown>;
       return result;
     },
 
@@ -102,15 +206,46 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
 
     async suspendChannel(name: string) {
       if (!repository.currentChannel(name)) throw new Error(`cannot suspend channel "${name}": channel does not exist`);
-      const blueprint = ensureChannelBlueprint(repository, blueprintStore, name);
+      ensureChannelBlueprint(repository, blueprintStore, name);
+      const activeMembers = repository.db.prepare(`SELECT m.session_id
+        FROM memberships m
+        JOIN sessions s ON s.id=m.session_id
+        WHERE m.channel_id=? AND m.left_at IS NULL AND m.session_ended_at IS NULL AND s.ended_at IS NULL`).all(name) as Array<{ session_id: string }>;
+      blueprintStore.retainMembers(name, new Set(activeMembers.map(member => member.session_id)));
+      // Refresh every blueprint member from the latest runtime row so mass
+      // termination still leaves a resumeable providerThreadId when known.
+      for (const member of blueprintStore.read(name)?.members ?? []) {
+        const row = repository.db.prepare("SELECT generation, provider_thread_id, state, ended_at FROM runtimes WHERE session_id=? ORDER BY generation DESC, created_at DESC LIMIT 1").get(member.priorSessionId) as { generation?: number; provider_thread_id?: string | null; state?: string; ended_at?: string | null } | undefined;
+        const providerThreadId = row?.provider_thread_id ?? repository.currentSession(member.priorSessionId)?.providerThreadId ?? member.provider?.conversationId ?? null;
+        canonical.ensureBlueprint(name, name, {
+          ...member,
+          processGeneration: Number(row?.generation ?? member.processGeneration),
+          provider: providerThreadId ? {
+            conversationId: providerThreadId,
+            resumeDescriptor: {
+              ...(typeof member.provider?.resumeDescriptor === "object" && member.provider.resumeDescriptor ? member.provider.resumeDescriptor as Record<string, unknown> : {}),
+              provider: member.adapterKind,
+              mode: "runtime",
+              cwd: member.launch.cwd,
+            },
+          } : null,
+        });
+      }
+      const blueprint = blueprintStore.read(name)!;
       return lifecycle.suspend(name, `cli-suspend-${name}`, blueprint);
     },
 
     async resumeChannel(name: string) {
-      if (!repository.currentChannel(name)) throw new Error(`cannot resume channel "${name}": channel does not exist`);
+      const channel = repository.currentChannel(name);
+      if (!channel) throw new Error(`cannot resume channel "${name}": channel does not exist`);
+      if (channel.lifecycleState === "closed") return repository.reopenChannel(name);
       if (!blueprintStore.read(name)) throw new Error(`cannot resume channel "${name}": channel has not been suspended`);
-      const status = lifecycle.status(name) as { generation?: number };
-      const generation = Number(status.generation ?? 0) + 1;
+      const status = lifecycle.status(name) as { state?: string; generation?: number };
+      const blueprintGeneration = Math.max(0, ...(blueprintStore.read(name)?.members.map(member => member.processGeneration) ?? []));
+      // Reuse an incomplete resume generation/key so a failed attempt can be
+      // claimed again after its lease expires, instead of reporting
+      // "resume is in progress" forever under a new key.
+      const generation = resolveResumeGeneration(status, blueprintGeneration);
       return lifecycle.resume(name, `cli-resume-${name}-${generation}`, generation);
     },
 
@@ -120,9 +255,23 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       return daemonRuntime.callAs(actor.sessionId, "closeChannel", { channelId: name });
     },
 
+    async archiveChannel(input: ArchiveChannelInput) {
+      const actor = runtimeActor(repository, input.credential);
+      if (actor.role !== "operator") throw new Error("channel archive requires an operator credential");
+      const channel = repository.currentChannel(input.channel);
+      if (channel?.ownerOperatorSessionId && channel.ownerOperatorSessionId !== actor.sessionId) throw new Error("channel archive requires the owning operator credential");
+      return archiveChannelLifecycle(repository, { channelId: input.channel, force: input.force }, {
+        terminateRuntime: (runtime) => daemonRuntime.callAs(actor.sessionId, "runtimeTerminate", { runtimeId: runtime.runtimeId, generation: runtime.generation }),
+        closeChannel: () => daemonRuntime.callAs(actor.sessionId, "closeChannel", { channelId: input.channel }),
+      });
+    },
+
     async createSession(input: SessionCreateInput) {
       const actor = runtimeActor(repository, input.credential);
       const role = input.role ?? "worker";
+      if (actor.role !== "operator" && !(actor.role === "planner" && role === "worker" && repository.isActiveMember(input.channel, actor.sessionId, "planner"))) {
+        throw new Error("session launch requires an operator or the channel's active planner launching a worker");
+      }
       await daemonRuntime.call("registerSession", { channelId: input.channel, sessionId: input.name, role });
       let launched: unknown;
       try {
@@ -131,7 +280,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
           sessionId: input.name,
           generation: 1,
           channelId: input.channel,
-          adapterKind: input.agent,
+          adapterKind: input.adapter ?? input.agent,
           providerThreadId: input.providerThreadId ?? null,
           cwd: input.cwd,
           command: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent),
@@ -151,7 +300,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
         intent: { role, workUnitId: null },
         launch: { executable: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent)[0]!, args: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent).slice(1), cwd: input.cwd },
         layout: { terminalColumns: null, terminalRows: null, layoutVersion: "1" },
-        adapterKind: input.agent,
+        adapterKind: input.adapter ?? input.agent,
         lastAcknowledgedDeliveryCursor: "0",
         role,
         joinedAt: isoNow(),
@@ -163,7 +312,12 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
     },
 
     async registerSession(input: SessionRegisterInput) {
-      return daemonRuntime.call("registerSession", { channelId: input.channel, sessionId: input.name, role: input.role, externalId: input.externalId });
+      return daemonRuntime.call("registerSession", { channelId: input.channel, sessionId: input.name, role: input.role, externalId: input.externalId, deliveryMode: input.deliveryMode });
+    },
+
+    async updateSessionRole(input) {
+      const actor = runtimeActor(repository, input.credential);
+      return daemonRuntime.callAs(actor.sessionId, "updateSessionRole", { channelId: input.channel, sessionId: input.sessionId, role: input.role });
     },
 
     async inspectSession(sessionId: string) {
@@ -181,7 +335,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
     },
 
     async commitMessage(input: CommitMessageInput) {
-      return daemonRuntime.callAs(input.sender, "send", { channelId: input.channel, senderSessionId: input.sender, body: input.body, target: input.target ? { kind: "direct", sessionId: input.target, sessionIds: [input.target] } : { kind: "broadcast", sessionIds: [] } });
+      return daemonRuntime.callAs(input.sender, "send", { channelId: input.channel, senderSessionId: input.sender, body: input.body, target: input.target ? { kind: "direct", sessionId: input.target, sessionIds: [input.target] } : { kind: "broadcast", sessionIds: [] }, replyToEventId: input.replyToEventId });
     },
 
     async listMessages(input: ListMessagesInput) {
@@ -190,22 +344,43 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
         afterCursor: input.since,
         sessionId: input.session,
         limit: input.limit,
+        replyToEventId: input.replyToEventId,
+      });
+    },
+
+    async showMessage(input: ShowMessageInput) {
+      const result = await daemonRuntime.call("getEvents", { channelId: input.channel ?? undefined, eventId: input.eventId }) as { events?: unknown[]; cursor?: string };
+      return { event: result.events?.[0], cursor: result.cursor };
+    },
+
+    async listReplies(input: ListRepliesInput) {
+      return daemonRuntime.call("getEvents", {
+        channelId: input.channel ?? undefined,
+        afterCursor: input.since,
+        sessionId: input.session,
+        limit: input.limit,
+        replyToEventId: input.eventId,
       });
     },
 
     async sendPrompt(input: SendPromptInput) {
-      return daemonRuntime.callAs(input.session, "send", { channelId: input.channel, senderSessionId: input.session, body: input.prompt, target: { kind: "direct", sessionId: input.session, sessionIds: [input.session] } });
+      const actor = runtimeActor(repository, input.credential);
+      return daemonRuntime.callAs(actor.sessionId, "send", { channelId: input.channel, senderSessionId: actor.sessionId, body: input.prompt, target: { kind: "direct", sessionId: input.session, sessionIds: [input.session] } });
     },
     async runtimeCreate(input: RuntimeCLIInput) { const actor = runtimeActor(repository, input.credential); return daemonRuntime.callAs(actor.sessionId, "runtimeCreate", { runtimeId: input.runtimeId, homeAuthorityId: input.homeAuthorityId ?? homeAuthorityId, sessionId: input.sessionId, generation: input.generation, machineId: input.machineId, stateDir: input.stateDir, shell: input.shell, command: input.command, cwd: input.cwd, channelId: input.channelId, adapterKind: input.adapterKind, providerThreadId: input.providerThreadId ?? null }); },
     async runtimeList(credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeList", {}); },
+    async runtimeQuotaGet(machineId?: string) { return daemonRuntime.call("runtimeQuotaGet", { machineId }); },
+    async runtimeQuotaSet(machineId: string, limit: number, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeQuotaSet", { machineId, limit }); },
+    async runtimeQuotaReset(machineId: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeQuotaReset", { machineId }); },
     async runtimeStatus(runtimeId: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeStatus", { runtimeId }); },
     async runtimeAttach(input: RuntimeAttachCLIInput) { const actor = runtimeActor(repository, input.credential); return daemonRuntime.callAs(actor.sessionId, "runtimeAttach", input); },
     async runtimeResolveSessionAttach(sessionId: string, credential: string, mode: "observe" | "controller", outputCursor?: string) {
       const actor = runtimeActor(repository, credential);
       const listed = await daemonRuntime.callAs(actor.sessionId, "runtimeList", {}) as { runtimes?: Array<{ runtimeId: string; homeAuthorityId: string; sessionId: string; generation: number; state: string; endedAt?: string | null }> };
+      // runtimeList is already scoped: operators see all, sessions see self, and
+      // channel planners see workers they may supervise (internal work item).
       const runtime = (listed.runtimes ?? []).filter((item) => item.sessionId === sessionId && !item.endedAt && ["running", "recovering"].includes(item.state)).sort((left, right) => right.generation - left.generation)[0];
       if (!runtime) throw new Error(`session ${sessionId} has no active Rooms runtime`);
-      if (actor.role !== "operator" && actor.sessionId !== sessionId) throw new Error("runtimeUnauthorized");
       return { credential, runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, sessionId, generation: runtime.generation, viewerId: actor.sessionId, mode, outputCursor };
     },
     async runtimeResolveProviderAttach(providerThreadId: string, credential: string, mode: "observe" | "controller", outputCursor?: string) {
@@ -234,7 +409,22 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
     async runtimeRecover(input: RuntimeRecoverCLIInput) { const actor = runtimeActor(repository, input.credential); return daemonRuntime.callAs(actor.sessionId, "runtimeRecover", input); },
     async runtimeDeliverMessage(input: RuntimeDeliverCLIInput) { const actor = runtimeActor(repository, input.credential); return daemonRuntime.callAs(actor.sessionId, "runtimeDeliverMessage", input); },
     async runtimeEvents(runtimeId: string, generation: number, afterSeq: number, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeEvents", { runtimeId, generation, afterSeq }); },
+    async rotationInspect(channelId: string, sessionId: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "rotationInspect", { channelId, sessionId }); },
+    async rotationPrepare(channelId: string, sessionId: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "rotationPrepare", { channelId, sessionId }); },
+    async rotationAcknowledge(rotationId: string, nonce: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "rotationAcknowledge", { rotationId, nonce }); },
+    async rotationCommit(rotationId: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "rotationCommit", { rotationId }); },
+    async rotationCancel(rotationId: string, reason: string, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "rotationCancel", { rotationId, reason }); },
   };
+}
+
+export function nextResumeGeneration(lifecycleGeneration: number | undefined, blueprintGeneration: number): number {
+  return Math.max(Number(lifecycleGeneration ?? 0), blueprintGeneration) + 1;
+}
+
+/** Prefer an incomplete resume generation so CLI retries keep a stable claim key. */
+export function resolveResumeGeneration(status: { state?: string; generation?: number }, blueprintGeneration: number): number {
+  if (status.state === "resuming" && Number(status.generation) > 0) return Number(status.generation);
+  return nextResumeGeneration(status.generation, blueprintGeneration);
 }
 
 export function daemonUnavailableReason(paths: RoomsPaths, storePath: string): string {
@@ -366,7 +556,7 @@ class SQLiteCanonicalMembers implements CanonicalMemberReattachmentPort {
       ? JSON.parse(existing.blueprint_json) as ResumableChannelBlueprint
       : { version: 1, channelId, channelName, goal: "", suspendedAt: isoNow(), historyCursor: "0", members: [] };
     const members = blueprint.members.some(item => item.priorSessionId === member.priorSessionId)
-      ? blueprint.members
+      ? blueprint.members.map(item => item.priorSessionId === member.priorSessionId ? member : item)
       : [...blueprint.members, member];
     this.repository.db.prepare("INSERT INTO channel_blueprints(channel_id, blueprint_json, state, updated_at) VALUES (?, ?, 'active', ?) ON CONFLICT(channel_id) DO UPDATE SET blueprint_json=excluded.blueprint_json, updated_at=excluded.updated_at").run(channelId, JSON.stringify({ ...blueprint, members }), isoNow());
   }

@@ -2,8 +2,8 @@
 
 ## Supported scope
 
-Security fixes target the latest Wardroom v0.1 source and package release.
-Public v0.1 is a single-machine release. It omits federation and remote terminal
+Security fixes target the latest Wardroom v0.2.1 source and package release.
+Public v0.2.1 is a single-machine release. It omits federation and remote terminal
 control; any cross-machine transport needs a separate security review before a
 later release.
 

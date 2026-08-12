@@ -5,11 +5,11 @@ import { installService, runRoomsService, serviceStatus } from "./launchd.js";
 import { installRelease, releasePaths, switchToRelease, verifyCurrentRelease, verifyRelease } from "./release.js";
 import { assertSafeVersion, type RoomsPaths } from "./paths.js";
 
-export function runRoomsInstall(releaseDirectory: string, options: { stateDir?: string; installRoot?: string } = {}): unknown {
+export function runRoomsInstall(releaseDirectory: string, options: { stateDir?: string; installRoot?: string; allowIdentityChange?: boolean } = {}): unknown {
   return installRelease(releaseDirectory, options);
 }
 
-export function runRoomsUpgrade(releaseDirectory: string, options: { stateDir?: string; installRoot?: string } = {}): unknown {
+export function runRoomsUpgrade(releaseDirectory: string, options: { stateDir?: string; installRoot?: string; allowIdentityChange?: boolean } = {}): unknown {
   const paths = releasePaths(options);
   const prior = safeCurrent(paths);
   const drained = runRoomsDrain(options);

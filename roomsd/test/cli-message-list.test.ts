@@ -21,6 +21,8 @@ async function withTemporaryRoomsDaemon(
     stateDir: process.env.ROOMS_STATE_DIR,
     storePath: process.env.ROOMS_STORE_PATH,
     daemonStorePath: process.env.ROOMSD_STORE_PATH,
+    sessionId: process.env.ROOMS_SESSION_ID,
+    channelId: process.env.ROOMS_CHANNEL_ID,
   };
   setupMachineIdentity(stateDir);
   const seedStore = new RoomsRepository(paths.storePath);
@@ -36,6 +38,8 @@ async function withTemporaryRoomsDaemon(
     if (previous.stateDir === undefined) delete process.env.ROOMS_STATE_DIR; else process.env.ROOMS_STATE_DIR = previous.stateDir;
     if (previous.storePath === undefined) delete process.env.ROOMS_STORE_PATH; else process.env.ROOMS_STORE_PATH = previous.storePath;
     if (previous.daemonStorePath === undefined) delete process.env.ROOMSD_STORE_PATH; else process.env.ROOMSD_STORE_PATH = previous.daemonStorePath;
+    if (previous.sessionId === undefined) delete process.env.ROOMS_SESSION_ID; else process.env.ROOMS_SESSION_ID = previous.sessionId;
+    if (previous.channelId === undefined) delete process.env.ROOMS_CHANNEL_ID; else process.env.ROOMS_CHANNEL_ID = previous.channelId;
     await server.close();
     composition.database.close();
     rmSync(stateDir, { recursive: true, force: true });
@@ -130,6 +134,50 @@ describe("rooms message list", () => {
     );
   });
 
+  it("advances the cursor past unrelated channel traffic in the same query", async () => {
+    let latestCursor = "0";
+    await withTemporaryRoomsDaemon(
+      "rooms-cli-messages-unrelated-cursor-",
+      (store) => {
+        store.insertSession({ id: "mine" });
+        store.insertSession({ id: "theirs" });
+        store.insertSession({ id: "other" });
+        store.insertChannel({ id: "busy" });
+        store.commitMessage({
+          channelId: "busy",
+          senderSessionId: "mine",
+          body: "mine-0",
+          target: { kind: "direct", sessionId: "other", sessionIds: ["other"] },
+          deliveryStatuses: { other: "delivered" },
+        });
+        for (let index = 0; index < 40; index += 1) {
+          latestCursor = store.commitMessage({
+            channelId: "busy",
+            senderSessionId: "theirs",
+            body: `theirs-${index}`,
+            target: { kind: "direct", sessionId: "other", sessionIds: ["other"] },
+            deliveryStatuses: { other: "delivered" },
+          }).cursor;
+        }
+      },
+      async () => {
+        const backend = createDefaultRoomsCLIBackend();
+        const first = JSON.parse(await runRoomsCLI(
+          ["message", "list", "--session", "mine", "--channel", "busy"],
+          backend,
+        )) as { events: Array<{ body: string }>; cursor: string };
+        expect(first.events.map((event) => event.body)).toEqual(["mine-0"]);
+        expect(first.cursor).toBe(latestCursor);
+        const next = JSON.parse(await runRoomsCLI(
+          ["message", "list", "--session", "mine", "--channel", "busy", "--since", first.cursor],
+          backend,
+        )) as { events: unknown[]; cursor: string };
+        expect(next.events).toEqual([]);
+        expect(next.cursor).toBe(first.cursor);
+      },
+    );
+  });
+
   it("rejects an out-of-range --limit instead of returning everything", async () => {
     await withTemporaryRoomsDaemon(
       "rooms-cli-messages-limit-",
@@ -139,6 +187,87 @@ describe("rooms message list", () => {
           ["message", "list", "--session", "mine", "--limit", "0"],
           createDefaultRoomsCLIBackend(),
         )).rejects.toThrow(/--limit must be an integer between 1 and 500/);
+      },
+    );
+  });
+});
+
+describe("Rooms structured replies", () => {
+  it("sends, shows, and queries exact replies without changing the body", async () => {
+    let parentEventId = "";
+    await withTemporaryRoomsDaemon(
+      "rooms-cli-replies-",
+      (store) => {
+        store.insertSession({ id: "sender", role: "worker", deliveryMode: "log" });
+        store.insertSession({ id: "recipient", role: "worker", deliveryMode: "log" });
+        store.insertChannel({ id: "build" });
+        store.insertMembership("build", "sender", "worker");
+        store.insertMembership("build", "recipient", "worker");
+        const parent = store.commitMessage({
+          channelId: "build",
+          senderSessionId: "recipient",
+          body: "parent body",
+          target: { kind: "direct", sessionId: "sender", sessionIds: ["sender"] },
+          deliveryStatuses: { sender: "delivered" },
+        });
+        parentEventId = (parent.event as { id: string }).id;
+      },
+      async () => {
+        process.env.ROOMS_SESSION_ID = "sender";
+        process.env.ROOMS_CHANNEL_ID = "build";
+        const backend = createDefaultRoomsCLIBackend();
+        const sent = JSON.parse(await runRoomsCLI([
+          "session", "send", "recipient", "--body", "reply body", "--reply-to", parentEventId,
+        ], backend)) as { event: { id: string; body: string; correlation: { replyToEventId: string } } };
+
+        expect(sent.event.body).toBe("@sender reply body");
+        expect(sent.event.body).not.toContain(parentEventId);
+        expect(sent.event.correlation).toEqual({ replyToEventId: parentEventId });
+
+        const shown = JSON.parse(await runRoomsCLI(["message", "show", sent.event.id], backend)) as { event: typeof sent.event };
+        expect(shown.event).toMatchObject({ id: sent.event.id, correlation: { replyToEventId: parentEventId } });
+
+        const replies = JSON.parse(await runRoomsCLI(["message", "replies", parentEventId], backend)) as { events: Array<typeof sent.event>; hasMore: boolean };
+        expect(replies.events).toEqual([expect.objectContaining({ id: sent.event.id, correlation: { replyToEventId: parentEventId } })]);
+        expect(replies.hasMore).toBe(false);
+
+        const listed = JSON.parse(await runRoomsCLI([
+          "message", "list", "--session", "sender", "--reply-to", parentEventId,
+        ], backend)) as { events: Array<typeof sent.event> };
+        expect(listed.events.map((event) => event.id)).toEqual([sent.event.id]);
+      },
+    );
+  });
+
+  it("rejects replies to missing messages and messages from another channel", async () => {
+    let otherEventId = "";
+    await withTemporaryRoomsDaemon(
+      "rooms-cli-replies-stale-",
+      (store) => {
+        store.insertSession({ id: "sender", role: "worker", deliveryMode: "log" });
+        store.insertSession({ id: "recipient", role: "worker", deliveryMode: "log" });
+        store.insertChannel({ id: "build" });
+        store.insertChannel({ id: "other" });
+        store.insertMembership("build", "sender", "worker");
+        store.insertMembership("build", "recipient", "worker");
+        otherEventId = (store.commitMessage({
+          channelId: "other",
+          senderSessionId: "recipient",
+          body: "other parent",
+          target: { kind: "direct", sessionId: "sender", sessionIds: ["sender"] },
+          deliveryStatuses: { sender: "delivered" },
+        }).event as { id: string }).id;
+      },
+      async () => {
+        process.env.ROOMS_SESSION_ID = "sender";
+        process.env.ROOMS_CHANNEL_ID = "build";
+        const backend = createDefaultRoomsCLIBackend();
+        await expect(runRoomsCLI([
+          "session", "send", "recipient", "--body", "reply", "--reply-to", "event_missing",
+        ], backend)).rejects.toThrow("staleReply");
+        await expect(runRoomsCLI([
+          "session", "send", "recipient", "--body", "reply", "--reply-to", otherEventId,
+        ], backend)).rejects.toThrow("staleReply");
       },
     );
   });

@@ -18,6 +18,7 @@ const FORWARDING: Readonly<Record<RoomsProvider, ((effort: ReasoningEffort) => s
   codex: (effort) => ["-c", `model_reasoning_effort=${effort}`],
   grok: (effort) => ["--reasoning-effort", effort],
   claude: null,
+  gemini: null,
 };
 
 export function parseReasoningEffort(value: string): ReasoningEffort {

@@ -5,8 +5,11 @@ if [ "$#" -ne 1 ]; then
   echo "usage: install.sh DESTINATION" >&2
   exit 2
 fi
-src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/dist/rooms-runtime-host-darwin-arm64
-manifest=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/dist/install-manifest.json
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+os=${GOOS:-$(go env GOOS)}
+arch=${GOARCH:-$(go env GOARCH)}
+src="$root/dist/rooms-runtime-host-${os}-${arch}"
+manifest="$root/dist/install-manifest.json"
 [ -f "$src" ] || { echo "build the host first" >&2; exit 1; }
 [ -f "$manifest" ] || { echo "missing install manifest" >&2; exit 1; }
 dest=$1
@@ -16,4 +19,3 @@ if [ -e "$dest" ]; then
 fi
 install -m 0755 "$src" "$dest"
 install -m 0644 "$manifest" "$dest.manifest.json"
-

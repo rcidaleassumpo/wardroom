@@ -25,10 +25,14 @@ describe("public pull-request CI", () => {
     expect(releaseWorkflow).toContain("npm test");
     expect(releaseWorkflow).toContain("package-distributions.mjs");
     expect(releaseWorkflow).toContain("npm install --global --prefix");
-    expect(releaseWorkflow).toContain("--verify-tag --draft");
-    expect(releaseWorkflow).toContain("npm publish \"${npm_package}\" --access public --provenance");
-    expect(releaseWorkflow.indexOf("Create draft GitHub release")).toBeLessThan(releaseWorkflow.indexOf("Publish npm package with provenance"));
-    expect(releaseWorkflow.indexOf("Publish npm package with provenance")).toBeLessThan(releaseWorkflow.indexOf("Publish GitHub release"));
+    expect(releaseWorkflow).toContain("--verify-tag --generate-notes");
+    expect(releaseWorkflow).toContain("Publish unsigned community release");
+    expect(releaseWorkflow).toContain("Unsigned Apple Silicon community build");
+    expect(releaseWorkflow).toContain("ROOMS_RELEASE_FEDERATION: disabled");
+    expect(releaseWorkflow).toContain("ROOMS_ALLOW_UNSTABLE_IDENTITY: '1'");
+    expect(releaseScript).toContain('features: {');
+    expect(releaseScript).toContain('federation: federationEnabled');
+    expect(releaseWorkflow).not.toContain("npm publish");
   });
 
   it("publishes Wardroom while preserving the rooms executable", () => {
