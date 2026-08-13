@@ -1,12 +1,12 @@
-# Wardroom Go runtime host
+# Rooms Go runtime host
 
 This directory is the production packaging boundary for the per-session Go
 runtime host. The benchmark host under `benchmarks/runtime-host-language` is a
 separate research artifact and is not used as the installed binary.
 
-The shipped host is a standalone Apple Silicon macOS binary built with cgo
-disabled and no third-party modules. It accepts only the inherited enrollment
-socketpair (fd 3); it never binds a network listener. Runtime state is created
+The host supports Apple Silicon macOS and Linux on amd64 or arm64. Each build
+has cgo disabled and no third-party modules. It accepts only the inherited
+enrollment socketpair (fd 3); it never binds a network listener. Runtime state is created
 under an owner-only directory and the control socket is mode 0600.
 
 ## Build
@@ -17,15 +17,19 @@ From this directory, run:
 ./build.sh
 ```
 
-The output is `dist/rooms-runtime-host-darwin-arm64`, with a SHA-256 sidecar
-and a machine-readable install manifest. The build refuses non-darwin-arm64
-targets unless explicitly overridden for source inspection.
+The output is `dist/rooms-runtime-host-<os>-<arch>`, with a SHA-256 sidecar and
+a machine-readable install manifest. Supported targets are `darwin-arm64`,
+`linux-amd64`, and `linux-arm64`.
 
 ## Provision
 
 `install.sh <destination>` installs the binary and manifest without touching
 existing files. Provisioning, signing, notarization, and quarantine approval
 are deployment-owned steps; this package does not silently claim them.
+
+Rooms' toolchain-free release, installer, doctor, and managed service remain
+Apple Silicon macOS only. This directory does not claim a Linux systemd unit,
+packaged Rooms daemon/CLI, clean-machine install, or provider launch proof.
 
 The operator-facing validation sequence is in [MANUAL-QA.md](MANUAL-QA.md).
 
@@ -41,9 +45,11 @@ strict JSON (unknown fields and trailing data are rejected):
 
 The non-empty secret is accepted only from fd 3. It is never read from
 argv/environment and is not written to logs, output, events, or diagnostics.
-The host creates the 0700 parent and atomically creates a 0600 state file and
-0600 Unix socket. State contains the launch binding, expiry, correlation,
-secret hash, and the plaintext reconnect material needed by the host; Wardroom
+The host creates the 0700 parent. It also creates a 0600 state file and 0600
+Unix socket atomically.
+
+State contains the launch binding, expiry, correlation,
+secret hash, and the plaintext reconnect material needed by the host. Rooms
 durable storage receives only hash/correlation metadata. The in-memory launch
 copy is wiped after state creation and the active secret is wiped on `wipe`.
 

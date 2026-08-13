@@ -30,7 +30,7 @@ body:
         - CLI
         - TypeScript daemon
         - macOS runtime host
-        - Installation or service lifecycle
+        - SSH-stdio federation
         - Protocol or persistence
         - Build, CI, or documentation
         - Other
@@ -47,7 +47,7 @@ body:
     id: expected
     attributes:
       label: Expected behavior
-      description: State the result or boundary you expected Wardroom to preserve.
+      description: State the result or boundary you expected Rooms to preserve.
     validations:
       required: true
   - type: textarea
@@ -82,5 +82,5 @@ body:
     attributes:
       label: Data safety
       options:
-        - label: I did not attach real Wardroom state and removed secrets, real identities, private paths, host details, message data, and transcripts.
+        - label: I did not attach real Rooms state and removed secrets, real identities, private paths, host details, message data, and transcripts.
           required: true

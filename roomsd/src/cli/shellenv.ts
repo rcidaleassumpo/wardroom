@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { ResumableChannelBlueprint } from "../blueprints/resumable.js";
 import type { DurableChannelLifecycle, MemberResumeOutcome } from "../lifecycle/suspend-resume.js";
 

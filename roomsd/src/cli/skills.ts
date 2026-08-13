@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { readMachineIdentityStatus, resolveRoomsStateDir } from "../identity/machine-identity.js";
-import { discoverProviders, listRegisteredProviders, type RoomsProvider } from "./provider-registry.js";
+import { discoverProviders, listRegisteredProviders, ROOM_PROVIDERS, type RoomsProvider } from "./provider-registry.js";
 
 export const ROOMS_SKILL_NAME = "rooms-coordination";
 
@@ -33,6 +34,7 @@ Use Rooms as the only channel, session, runtime, and message authority.
 - Broadcast with \`rooms channel send <channel> --body "<message>"\`.
 - Send directly with \`rooms session send <session-id> --body "<message>"\`.
 - If a direct recipient is unknown locally, run \`rooms session locate <session-id>\` to search registered machines, then resend to the exact \`target\` Rooms returns.
+- If a direct send reports that the recipient has no live local runtime, do not retry the unqualified ID. Run \`rooms session locate <session-id>\` immediately; a live remote match must be sent using its exact federation-qualified \`target\`.
 - Never add an \`@session-id\` prefix to the body. Rooms adds it exactly once.
 - The visible \`@session-id\` identifies the sender, never the recipient. The target stays in routing metadata.
 - When Rooms returns a federation-qualified target, pass that exact target back to Rooms. Do not construct federation addresses.
@@ -91,6 +93,7 @@ export function providerSkillPath(provider: RoomsProvider, environment: NodeJS.P
     codex: environment.CODEX_HOME || join(userHome, ".codex"),
     claude: environment.CLAUDE_CONFIG_DIR || join(userHome, ".claude"),
     grok: environment.GROK_HOME || join(userHome, ".grok"),
+    gemini: environment.GEMINI_HOME || join(userHome, ".gemini"),
   };
   const root = roots[provider];
   if (!isAbsolute(root)) throw new Error(`Rooms ${provider} skill home must be an absolute path`);
@@ -231,7 +234,7 @@ function parseEntry(input: unknown): SkillEntry {
   const value = input as Record<string, unknown>;
   const expectedKeys = ["provider", "path", "sha256", "installedAt"].sort();
   if (Object.keys(value).sort().some((key, index) => key !== expectedKeys[index]) || Object.keys(value).length !== expectedKeys.length) throw new Error("Rooms skills manifest entry contains unknown or missing fields");
-  if (!(["codex", "claude", "grok"] as unknown[]).includes(value.provider) || typeof value.path !== "string" || !isAbsolute(value.path) || typeof value.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.sha256) || typeof value.installedAt !== "string") throw new Error("Rooms skills manifest contains an invalid entry");
+  if (!(ROOM_PROVIDERS as readonly unknown[]).includes(value.provider) || typeof value.path !== "string" || !isAbsolute(value.path) || typeof value.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.sha256) || typeof value.installedAt !== "string") throw new Error("Rooms skills manifest contains an invalid entry");
   return value as unknown as SkillEntry;
 }
 

@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
 // Rooms production per-session runtime host (Go).
 //
 // This source is intentionally maintained in the production packaging tree;
 // the benchmark candidate is not an installed/runtime dependency.
 //
 // One process, one PTY, blocking goroutines, zero dependencies. Implements
-// PROTOCOL.md exactly; every OS call is in adapter_darwin.go.
+// PROTOCOL.md exactly; every OS call is in an adapter_<os>.go file.
 
 package main
 
@@ -205,6 +206,7 @@ func run(ringBytes int, shell string) {
 	}
 	env := []string{
 		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
 		"HOME=" + os.Getenv("HOME"),
 		"USER=" + os.Getenv("USER"),
 		"LOGNAME=" + os.Getenv("LOGNAME"),

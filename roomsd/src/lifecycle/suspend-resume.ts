@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { AllowlistedLaunchConfig, LayoutMetadata, MemberIntent, ProviderConversationRef, ResumableChannelBlueprint, ResumableMemberBlueprint } from "../blueprints/resumable.js";
 import { cloneBlueprint, validateBlueprint } from "../blueprints/resumable.js";
 
@@ -7,11 +8,13 @@ export interface RuntimeGenerationPort {
   launch(input: { channelId: string; priorSessionId: string; generation: number; launch: AllowlistedLaunchConfig; layout: LayoutMetadata; adapterKind: string }): Promise<{ sessionId: string; runtimeId: string }>;
   stop(input: { sessionId: string; runtimeId: string; fence: TeardownFence }): Promise<void>;
   stopGeneration(input: { priorSessionId: string; generation: number; fence: TeardownFence }): Promise<void>;
+  activeGenerations?(input: readonly { priorSessionId: string; generation: number }[]): Promise<ReadonlySet<string>> | ReadonlySet<string>;
 }
 export interface ProviderConversationPort {
   stop(ref: ProviderConversationRef, fence: TeardownFence): Promise<void>;
   stopRollback(ref: ProviderConversationRef, fence: TeardownFence): Promise<void>;
   resume(ref: ProviderConversationRef, generation: number): Promise<void>;
+  resumeWithReply?(ref: ProviderConversationRef, generation: number): Promise<string>;
   /** Cheap, side-effect-free validation performed before a replacement runtime is created. */
   validateResume?(ref: ProviderConversationRef): Promise<void> | void;
 }
@@ -23,7 +26,13 @@ export interface CanonicalMemberReattachmentPort {
 export interface ResumeMemberRecord { channelId: string; priorSessionId: string; sessionId: string; runtimeId: string; generation: number; role: string | null; provider: ProviderConversationRef | null; providerPhase?: "launched" | "provider_resuming" | "provider_resumed" }
 
 function resumeLaunch(member: ResumableMemberBlueprint): AllowlistedLaunchConfig {
-  const descriptor = member.provider?.resumeDescriptor as { provider?: string } | null;
+  const descriptor = member.provider?.resumeDescriptor as { provider?: string; mode?: string } | null;
+  if (member.provider && descriptor?.mode === "runtime" && descriptor.provider === "claude") {
+    return { executable: member.launch.executable, args: ["--resume", member.provider.conversationId, ...member.launch.args], cwd: member.launch.cwd };
+  }
+  if (member.provider && descriptor?.mode === "runtime" && descriptor.provider === "codex") {
+    return { executable: member.launch.executable, args: ["resume", member.provider.conversationId, ...member.launch.args], cwd: member.launch.cwd };
+  }
   if (member.provider && descriptor?.provider === "claude") return { executable: "claude", args: ["--resume", member.provider.conversationId], cwd: member.launch.cwd };
   return member.launch;
 }
@@ -76,19 +85,28 @@ export class DurableChannelLifecycle {
       validateBlueprint(blueprint);
       const existing = this.store.read(channelId);
       const existingSuspendKey = this.store.suspendIdempotencyKey(channelId);
+      const members = blueprint.members.map(member => ({ priorSessionId: member.priorSessionId, generation: member.processGeneration }));
+      const activeGenerations = await this.runtime.activeGenerations?.(members) ?? new Set<string>();
       if (existingSuspendKey !== null && existingSuspendKey !== idempotencyKey) throw new Error("suspend idempotency key mismatch");
       if (existingSuspendKey !== null && existing && JSON.stringify(existing) !== JSON.stringify(blueprint)) throw new Error("suspend blueprint mismatch");
-      if (existingSuspendKey === idempotencyKey && existing && this.store.suspensionComplete(channelId)) return cloneBlueprint(existing);
+      if (existingSuspendKey === idempotencyKey && existing && this.store.suspensionComplete(channelId) && activeGenerations.size === 0) return cloneBlueprint(existing);
       if (!this.store.transaction(() => this.store.claimSuspend(channelId, idempotencyKey, blueprint, this.ownerId))) throw new Error("suspend claim is owned by another coordinator");
       if (!this.store.transaction(() => this.store.capture(channelId, cloneBlueprint(blueprint), this.ownerId))) throw new Error("suspend lease lost");
       for (const member of blueprint.members) {
-        if (this.store.transaction(() => this.store.memberStopped(channelId, member.priorSessionId))) continue;
+        const generationKey = `${member.priorSessionId}:${member.processGeneration}`;
+        if (this.store.transaction(() => this.store.memberStopped(channelId, member.priorSessionId)) && !activeGenerations.has(generationKey)) continue;
         try {
           if (!this.store.transaction(() => this.store.renewSuspend(channelId, idempotencyKey, this.ownerId))) throw new Error("suspend lease lost");
           await this.withSuspendLease(channelId, idempotencyKey, async () => {
             const fence = this.teardownFence(channelId, idempotencyKey);
             await fence.assertCurrent();
-            await this.runtime.stopGeneration({ priorSessionId: member.priorSessionId, generation: member.processGeneration, fence });
+            try {
+              await this.runtime.stopGeneration({ priorSessionId: member.priorSessionId, generation: member.processGeneration, fence });
+            } catch (error) {
+              // Mass terminate leaves no durable ownership row. Treat that as
+              // already stopped so suspend can still capture the blueprint.
+              if (!(error instanceof Error) || !/durably proven|not owned/.test(error.message)) throw error;
+            }
           });
           if (member.provider) {
             // A takeover may complete while the external runtime stop was in flight.
@@ -96,7 +114,11 @@ export class DurableChannelLifecycle {
             await this.withSuspendLease(channelId, idempotencyKey, async () => {
               const fence = this.teardownFence(channelId, idempotencyKey);
               await fence.assertCurrent();
-              await this.provider.stop(member.provider!, fence);
+              try {
+                await this.provider.stop(member.provider!, fence);
+              } catch (error) {
+                if (!(error instanceof Error) || !/durably proven|not owned/.test(error.message)) throw error;
+              }
             });
           }
           if (!this.store.transaction(() => this.store.recordMemberOutcome(channelId, member.priorSessionId, "stopped", this.ownerId))) throw new Error("suspend lease lost");
@@ -150,15 +172,16 @@ export class DurableChannelLifecycle {
       const launched: Array<ResumeMemberRecord & { outcome: MemberResumeOutcome }> = [];
       try {
         for (const member of blueprint.members) {
-          if (member.provider && this.provider.validateResume) await this.provider.validateResume(member.provider);
+          const runtimeOwnedResume = (member.provider?.resumeDescriptor as { mode?: string } | null)?.mode === "runtime";
+          if (member.provider && !runtimeOwnedResume && this.provider.validateResume) await this.provider.validateResume(member.provider);
           const fresh = await this.withResumeLease(channelId, idempotencyKey, resumeToken, () => this.runtime.launch({ channelId, priorSessionId: member.priorSessionId, generation, launch: resumeLaunch(member), layout: member.layout, adapterKind: member.adapterKind }));
           const record = { channelId, priorSessionId: member.priorSessionId, sessionId: fresh.sessionId, runtimeId: fresh.runtimeId, generation, role: member.role, provider: member.provider, outcome: { priorSessionId: member.priorSessionId, sessionId: fresh.sessionId, runtimeId: fresh.runtimeId, generation, outcome: "resumed" as const } };
           launched.push(record);
           if (!this.store.transaction(() => this.store.recordResumeLaunch(record, idempotencyKey, this.ownerId, resumeToken))) throw new Error("resume lease lost");
           if (member.provider) {
             if (!this.store.transaction(() => this.store.setResumeProviderPhase(channelId, member.priorSessionId, generation, "provider_resuming", idempotencyKey, this.ownerId, resumeToken))) throw new Error("resume lease lost");
-            const providerName = (member.provider!.resumeDescriptor as { provider?: string } | null)?.provider;
-            if (providerName !== "claude") await this.withResumeLease(channelId, idempotencyKey, resumeToken, () => this.provider.resume(member.provider!, generation));
+            const runtimeOwnedResume = (member.provider!.resumeDescriptor as { mode?: string } | null)?.mode === "runtime";
+            if (!runtimeOwnedResume) await this.withResumeLease(channelId, idempotencyKey, resumeToken, () => this.provider.resume(member.provider!, generation));
             if (!this.store.transaction(() => this.store.setResumeProviderPhase(channelId, member.priorSessionId, generation, "provider_resumed", idempotencyKey, this.ownerId, resumeToken))) throw new Error("resume lease lost");
           }
         }

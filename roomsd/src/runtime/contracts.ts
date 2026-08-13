@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { Cursor, SessionRole } from "../domain/contracts.js";
 
 export type RuntimeState = "creating" | "running" | "recovering" | "crashed" | "exited" | "terminating" | "terminated";
@@ -88,6 +89,16 @@ export interface RuntimeQuota {
   maxActiveRuntimes: number;
   maxObserversPerRuntime: number;
   updatedAt: string;
+}
+
+export interface RuntimeQuotaStatus extends RuntimeQuota {
+  source: "default" | "override";
+  activeRuntimes: number;
+  availableRuntimes: number;
+  runtimeCount: number;
+  utilizationPercent: number;
+  capacityState: "healthy" | "warning" | "exhausted";
+  states: Readonly<Record<RuntimeState, number>>;
 }
 
 export interface CreateRuntimeInput {

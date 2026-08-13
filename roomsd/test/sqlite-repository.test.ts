@@ -12,6 +12,19 @@ function tempStore() {
 }
 
 describe("SQLite Rooms repository", () => {
+  it("reopens a closed channel without restoring its ended memberships", () => {
+    const { store, dir } = tempStore();
+    try {
+      store.insertSession({ id: "operator", role: "operator" });
+      store.insertChannel({ id: "investigations", ownerOperatorSessionId: "operator" });
+      store.registerSession("investigations", "operator", "operator");
+      store.closeChannel("investigations");
+      store.reopenChannel("investigations");
+      expect(store.currentChannel("investigations")).toMatchObject({ lifecycleState: "active", closedAt: null });
+      expect(store.roster("investigations")).toEqual([]);
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("creates WAL schema with foreign keys and forward user_version", () => {
     const { store, dir } = tempStore();
     try {
@@ -51,6 +64,27 @@ describe("SQLite Rooms repository", () => {
     } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it("includes channel roles in lifecycle changes", () => {
+    const { store, dir } = tempStore();
+    try {
+      store.insertSession({ id: "worker", role: "worker" });
+      store.insertSession({ id: "reviewer", role: "reviewer" });
+      store.insertChannel({ id: "build" });
+      store.insertMembership("build", "worker", "worker");
+      store.insertMembership("build", "reviewer", "reviewer");
+
+      expect(store.recordRuntimeLifecycle({
+        channelId: "build", sessionId: "worker", runtimeId: "runtime-worker",
+        generation: 1, state: "running", endedAt: null,
+      }).changes[0]?.payload).toMatchObject({ sessionId: "worker", role: "worker" });
+      expect(store.leaveMembership("build", "reviewer").changes[0]?.payload)
+        .toMatchObject({ sessionId: "reviewer", role: "reviewer" });
+      expect(store.markSessionEnded("worker").changes[0]?.payload).toMatchObject({
+        sessionId: "worker", memberships: [{ channelId: "build", role: "worker" }],
+      });
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("reopens without losing history and replays after a cursor", () => {
     const { store, dir } = tempStore();
     const path = join(dir, "rooms.sqlite");
@@ -85,6 +119,57 @@ describe("SQLite Rooms repository", () => {
     } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it("stores canonical reply metadata and derives one thread root across nested replies", () => {
+    const { store, dir } = tempStore();
+    try {
+      store.insertSession({ id: "sender", role: "worker" });
+      store.insertSession({ id: "recipient", role: "worker" });
+      store.insertChannel({ id: "channel-a" });
+      store.insertChannel({ id: "channel-b" });
+      const target = { kind: "broadcast", sessionIds: ["recipient"] };
+      const root = store.commitMessage({ channelId: "channel-a", senderSessionId: "sender", body: "root", target }).event as any;
+      const otherRoot = store.commitMessage({ channelId: "channel-b", senderSessionId: "sender", body: "other root", target }).event as any;
+      const legacyReply = store.commitMessage({
+        channelId: "channel-a", senderSessionId: "sender", body: "legacy reply", target,
+        correlation: { purpose: "compatibility", replyToEventId: root.id },
+      }).event as any;
+      const nestedReply = store.commitMessage({
+        channelId: "channel-a", senderSessionId: "sender", body: "nested reply", target,
+        replyToEventId: legacyReply.id,
+      }).event as any;
+
+      expect(root).toMatchObject({ replyToEventId: null, threadRootEventId: null });
+      expect(legacyReply).toMatchObject({
+        replyToEventId: root.id,
+        threadRootEventId: root.id,
+        correlation: { purpose: "compatibility", replyToEventId: root.id },
+      });
+      expect(nestedReply).toMatchObject({
+        replyToEventId: legacyReply.id,
+        threadRootEventId: root.id,
+        correlation: { replyToEventId: legacyReply.id },
+      });
+      expect(store.snapshot("channel-a").events).toEqual([
+        expect.objectContaining({ id: root.id, replyToEventId: null, threadRootEventId: null }),
+        expect.objectContaining({ id: legacyReply.id, threadRootEventId: root.id }),
+        expect.objectContaining({ id: nestedReply.id, threadRootEventId: root.id }),
+      ]);
+
+      expect(() => store.commitMessage({
+        channelId: "channel-a", senderSessionId: "sender", body: "conflict", target,
+        replyToEventId: root.id, correlation: { replyToEventId: otherRoot.id },
+      })).toThrow(expect.objectContaining({ code: "invalidReplyMetadata" }));
+      expect(() => store.commitMessage({
+        channelId: "channel-a", senderSessionId: "sender", body: "missing", target,
+        replyToEventId: "event_missing",
+      })).toThrow(expect.objectContaining({ code: "staleReply", message: expect.stringContaining("does not exist") }));
+      expect(() => store.commitMessage({
+        channelId: "channel-a", senderSessionId: "sender", body: "cross channel", target,
+        replyToEventId: otherRoot.id,
+      })).toThrow(expect.objectContaining({ code: "staleReply", message: expect.stringContaining("another channel") }));
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("does not mark a runtime-less recipient delivered", () => {
     const { store, dir } = tempStore();
     try {
@@ -113,6 +198,23 @@ describe("SQLite Rooms repository", () => {
       expect(store.snapshot("build").events).toEqual([expect.objectContaining({ id: (sent.event as any).id, recipientStatuses: { recipient: "delivered" } })]);
       expect(store.listMessages("recipient", "0", "build").messages).toEqual([expect.objectContaining({ message: expect.objectContaining({ recipientStatuses: { recipient: "delivered" } }) })]);
       expect(store.replay(sent.cursor, "build").map((change) => change.kind)).toEqual(["message.delivery"]);
+    } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("resolves exact messages and filters replies by canonical metadata", () => {
+    const { store, dir } = tempStore();
+    try {
+      store.insertSession({ id: "sender", role: "worker" });
+      store.insertSession({ id: "recipient", role: "worker" });
+      store.insertChannel({ id: "build" });
+      const parent = store.commitMessage({ channelId: "build", senderSessionId: "sender", body: "parent", target: { kind: "direct", sessionId: "recipient" } });
+      const parentId = (parent.event as { id: string }).id;
+      const reply = store.commitMessage({ channelId: "build", senderSessionId: "recipient", body: "reply", target: { kind: "direct", sessionId: "sender" }, correlation: { replyToEventId: parentId } });
+      store.commitMessage({ channelId: "build", senderSessionId: "recipient", body: `body mentions ${parentId}`, target: { kind: "direct", sessionId: "sender" } });
+
+      expect(store.messageById(parentId)).toEqual({ event: parent.event, cursor: parent.cursor });
+      expect(store.messageReplies(parentId).events).toEqual([reply.event]);
+      expect(() => store.messageById("event_missing")).toThrow("unknownMessage");
     } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 

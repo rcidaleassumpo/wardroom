@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Wire framing and bounded production parser.
 // This exact code is what --fuzz-parse drives, per gate G1.
 

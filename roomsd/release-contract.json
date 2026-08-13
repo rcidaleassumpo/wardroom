@@ -1,4 +1,9 @@
 {
   "protocolVersion": 4,
-  "storeSchemaVersion": 15
+  "storeSchemaVersion": 21,
+  "codeIdentifiers": {
+    "rooms": "io.rooms.rooms",
+    "roomsd": "io.rooms.roomsd",
+    "rooms-runtime-host": "io.rooms.rooms-runtime-host"
+  }
 }

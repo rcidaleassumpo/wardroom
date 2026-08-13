@@ -10,4 +10,18 @@ describe("provider submission framing", () => {
     expect(submission.delaysMs[0]).toBe(0);
     expect(submission.delaysMs[1]).toBeGreaterThan(0);
   });
+
+  it("defuses composer mode prefixes with a leading space", () => {
+    for (const body of ["!task add BUG: late effects", "/compact now", "# remember this"]) {
+      const submission = encodeProviderSubmission(body);
+      expect(Buffer.from(submission.frames[0]!, "base64").toString()).toBe(` ${body}`);
+    }
+  });
+
+  it("leaves ordinary bodies untouched", () => {
+    for (const body of ["@mycelia-operator hello!", "plain text", "task add without bang"]) {
+      const submission = encodeProviderSubmission(body);
+      expect(Buffer.from(submission.frames[0]!, "base64").toString()).toBe(body);
+    }
+  });
 });

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export * from "./storage/repository.js";
 export * from "./storage/blueprint-repository.js";
 export * from "./domain/contracts.js";
@@ -5,6 +6,7 @@ export * from "./domain/application.js";
 export * from "./blueprints/resumable.js";
 export * from "./lifecycle/suspend-resume.js";
 export * from "./runtime/codex-adapter.js";
+export * from "./runtime/provider-usage.js";
 export * from "./runtime/contracts.js";
 export * from "./storage/runtime-repository.js";
 export * from "./runtime/host/codec.js";
@@ -13,6 +15,7 @@ export * from "./runtime/host/supervisor.js";
 export * from "./runtime/service.js";
 export * from "./cli/lifecycle.js";
 export * from "./cli/backend.js";
+export * from "./providers/capability-matrix.js";
 export * from "./identity/authority.js";
 export * from "./identity/machine-identity.js";
 export { loadFederationModule, registerFederationModule, requireFederationModule, type FederationModule } from "./federation-loader.js";

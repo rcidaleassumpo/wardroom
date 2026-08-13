@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 package main
 
 import (
@@ -5,9 +6,24 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestProviderEnvironmentDeclaresTrueColorTerminal(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, declaration := range []string{"TERM=xterm-256color", "COLORTERM=truecolor"} {
+		if !strings.Contains(text, `"`+declaration+`"`) {
+			t.Fatalf("provider environment lacks %s", declaration)
+		}
+	}
+}
 
 func TestHelloRenewsCapabilityOnSameConnection(t *testing.T) {
 	secret := []byte("01234567890123456789012345678901")

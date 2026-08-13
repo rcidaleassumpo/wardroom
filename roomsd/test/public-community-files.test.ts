@@ -15,7 +15,7 @@ const protocol = read(".github/ISSUE_TEMPLATE/3-protocol-design.yml");
 const chooser = read(".github/ISSUE_TEMPLATE/config.yml");
 
 describe("public contribution files", () => {
-  it("gives a clean-checkout build path without touching installed Wardroom state", () => {
+  it("gives a clean-checkout build path without touching installed Rooms state", () => {
     for (const value of ["Node.js 22", "npm ci", "npm run typecheck", "npm test", "npm run build", "go test ./...", "go vet ./..."]) {
       expect(contributing).toContain(value);
     }
@@ -29,7 +29,7 @@ describe("public contribution files", () => {
     expect(security).toContain("Do not open a public issue with credentials");
     expect(security).toContain("does not protect against root");
     expect(security).toContain("It is not a sandbox");
-    expect(security).toContain("omits federation and remote terminal");
+    expect(security).toContain("signed, one-use capability");
   });
 
   it("ships structured bug, feature, and protocol forms in every export", () => {
@@ -50,7 +50,7 @@ describe("public contribution files", () => {
   it("keeps public bug reports on disposable, redacted state", () => {
     expect(bug).toContain("temporary ROOMS_STATE_DIR");
     expect(bug).toContain("Never upload installed state");
-    expect(bug).toContain("I did not attach real Wardroom state");
+    expect(bug).toContain("I did not attach real Rooms state");
     expect(bug).toContain("removed secrets, real identities, private paths, host details, message data, and transcripts");
   });
 

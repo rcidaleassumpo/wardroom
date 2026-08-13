@@ -8,7 +8,7 @@ const firstSection = readme.slice(0, readme.indexOf("\n## "));
 
 describe("public README", () => {
   it("leads with durable channel semantics rather than agent RPC", () => {
-    for (const value of ["agent-to-agent (A2A)", "request and response RPC", "membership", "recipients", "cursors", "durable\nevents", "live terminal sessions", "Matrix-style rooms"]) {
+    for (const value of ["agent-to-agent (A2A)", "request and response RPC", "membership", "recipients", "cursors", "durable events", "live terminal sessions", "Matrix-style channels"]) {
       expect(firstSection).toContain(value);
     }
   });
@@ -45,16 +45,14 @@ describe("public README", () => {
     expect(readme).toContain("A send receipt or a message\nhistory row alone");
   });
 
-  it("states the federation, platform, distribution, and license scope", () => {
-    expect(readme).toContain("Wardroom v0.1 is single-machine only");
-    expect(readme).toContain("Federation is omitted from this public");
-    expect(readme).toContain("brew install rcidaleassumpo/tap/wardroom");
-    expect(readme).toContain("npm install --global wardroom");
-    expect(readme).toContain("Apple Silicon macOS release");
-    expect(readme).toContain("Wardroom is licensed under [Apache License 2.0](LICENSE)");
+  it("keeps federation and distribution claims narrow", () => {
+    expect(readme).toContain("not a commitment to include federation in the first\npublic release");
+    expect(readme).toContain("This README demonstrates only the single-machine path");
+    expect(readme).toContain("Wardroom uses the [Apache License 2.0](LICENSE)");
+    expect(readme).toMatch(/no public package,\s+signed binary, or approved public distribution yet/);
   });
 
-  it("keeps the product positioning independent of its repository host", () => {
+  it("keeps the positioning independent of the repository owner", () => {
     expect(firstSection).not.toContain("rcidaleassumpo");
     expect(readme).not.toMatch(/because (?:they are|it is) rooms/i);
   });

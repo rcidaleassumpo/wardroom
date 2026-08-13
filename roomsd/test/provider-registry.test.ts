@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, unlinkSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { discoverProviders, listRegisteredProviders, registerProvider, registeredProviderExecutable, unregisterProvider } from "../src/cli/provider-registry.js";
+import { discoverProviders, inspectProvider, listRegisteredProviders, registerProvider, registeredProviderExecutable, removeProvider, updateProvider } from "../src/cli/provider-registry.js";
 import { setupMachineIdentity } from "../src/identity/machine-identity.js";
 
 describe("Rooms machine provider registry", () => {
@@ -33,10 +33,43 @@ describe("Rooms machine provider registry", () => {
     expect(registeredProviderExecutable("codex", stateDir, { PATH: "" })).toBe(realpathSync(codex));
     discoverProviders(stateDir, { PATH: "" });
     expect(listRegisteredProviders(stateDir).map(item => item.name)).toEqual(["codex"]);
-    unregisterProvider("codex", stateDir);
+    removeProvider("codex", stateDir);
     expect(listRegisteredProviders(stateDir)).toEqual([]);
     unlinkSync(codex);
     expect(() => registeredProviderExecutable("codex", stateDir, { PATH: "" })).toThrow(/unavailable on this machine/);
+  });
+
+  it("persists the generic Gemini agy registration lifecycle and health", () => {
+    const root = mkdtempSync(join(tmpdir(), "rooms-providers-"));
+    const stateDir = join(root, "state");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    setupMachineIdentity(stateDir);
+    const agy = join(bin, "agy");
+    executable(agy);
+
+    registerProvider("gemini", { executable: agy, defaults: { permissions: "manual", model: "gemini-test" } }, stateDir);
+    expect(inspectProvider("gemini", stateDir)).toMatchObject({
+      name: "gemini", enabled: true, executable: realpathSync(agy), adapter: "agy",
+      defaults: { permissions: "manual", model: "gemini-test" }, health: { status: "available" },
+    });
+    updateProvider("gemini", { enabled: false }, stateDir);
+    expect(inspectProvider("gemini", stateDir)).toMatchObject({ enabled: false, health: { status: "disabled" } });
+    expect(() => registeredProviderExecutable("gemini", stateDir, { PATH: "" })).toThrow(/disabled/);
+    removeProvider("gemini", stateDir);
+    expect(listRegisteredProviders(stateDir)).toEqual([]);
+  });
+
+  it("discovers Gemini through the agy executable name", () => {
+    const root = mkdtempSync(join(tmpdir(), "rooms-providers-"));
+    const stateDir = join(root, "state");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    setupMachineIdentity(stateDir);
+    executable(join(bin, "agy"));
+    expect(discoverProviders(stateDir, { PATH: bin }).providers).toEqual([
+      expect.objectContaining({ name: "gemini", adapter: "agy", executable: realpathSync(join(bin, "agy")) }),
+    ]);
   });
 });
 

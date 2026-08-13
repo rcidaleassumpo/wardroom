@@ -42,8 +42,12 @@ jobs:
       - run: npm run build
 
   runtime-host-native:
-    name: Go runtime host (macOS arm64)
-    runs-on: macos-14
+    name: Go runtime host (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     defaults:
       run:
@@ -59,28 +63,6 @@ jobs:
       - run: go build ./...
       - run: go test ./...
       - run: go vet ./...
-
-  runtime-host-cross-build:
-    name: Go runtime host Darwin cross-build (Linux)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: roomsd/runtime-host-go
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
-        with:
-          go-version-file: roomsd/runtime-host-go/go.mod
-          cache: false
-      - name: Cross-build the supported darwin-arm64 host
-        env:
-          CGO_ENABLED: '0'
-          GOOS: darwin
-          GOARCH: arm64
-        run: go build -trimpath -o "${RUNNER_TEMP}/rooms-runtime-host-darwin-arm64" .
 
   release-smoke:
     name: Local-proof release build (macOS arm64)
@@ -104,29 +86,21 @@ jobs:
           go-version-file: roomsd/runtime-host-go/go.mod
           cache: false
       - run: npm ci --no-audit --no-fund
+      # CI has no code-signing certificate, so this build carries a per-build
+      # macOS identity. That is allowed here only because the release is thrown
+      # away with the runner and is never installed over another release.
       - name: Build an ad-hoc signed release without publishing it
         env:
           ROOMS_RELEASE_VERSION: 0.1.0-ci.${{ github.run_id }}.${{ github.run_attempt }}
           ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
           ROOMS_SIGNING_MODE: LOCAL_PROOF_ONLY
           ROOMS_SIGNING_IDENTITY: '-'
+          ROOMS_ALLOW_UNSTABLE_IDENTITY: '1'
         run: npm run build:release
       - name: Run the self-contained CLI
         env:
           ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
         run: '"${ROOMS_RELEASE_OUT}/rooms" --help >/dev/null'
-      - name: Build npm and Homebrew distribution artifacts
-        env:
-          ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release
-          ROOMS_DISTRIBUTION_OUT: ${{ runner.temp }}/rooms-distributions
-        run: |
-          node scripts/package-distributions.mjs --release-dir "${ROOMS_RELEASE_OUT}" --output "${ROOMS_DISTRIBUTION_OUT}"
-          ruby -c "${ROOMS_DISTRIBUTION_OUT}/homebrew-tap/Formula/wardroom.rb"
-          npm_package="$(find "${ROOMS_DISTRIBUTION_OUT}" -maxdepth 1 -name 'wardroom-*.tgz' -print -quit)"
-          test -n "${npm_package}"
-          npm install --global --prefix "${RUNNER_TEMP}/rooms-npm-prefix" "${npm_package}"
-          ROOMS_STATE_DIR="${RUNNER_TEMP}/rooms-npm-state" ROOMS_INSTALL_ROOT="${RUNNER_TEMP}/rooms-npm-install" "${RUNNER_TEMP}/rooms-npm-prefix/bin/rooms" install
-          test -x "${RUNNER_TEMP}/rooms-npm-install/lib/rooms/current/roomsd"
       - name: Run the published quickstart against an isolated service
         env:
           ROOMS_RELEASE_OUT: ${{ runner.temp }}/rooms-release

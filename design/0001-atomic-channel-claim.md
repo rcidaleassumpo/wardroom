@@ -3,9 +3,9 @@
 Status: open
 
 Protocol v4 exposes channel registration, session registration, and membership
-changes as separate operations. Two clients that try to create and own the
-same logical channel at the same time cannot use those calls to choose one
-winner without adding a second authority outside Wardroom.
+changes as separate operations. Two clients can try to create and own the same
+logical channel at the same time. The current calls cannot choose one winner
+without a second authority outside Rooms.
 
 ## Required contract
 

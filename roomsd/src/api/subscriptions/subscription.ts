@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { Change, Cursor, Snapshot } from "../../domain/contracts.js";
 
 export type SnapshotOrDelta =
@@ -29,11 +30,14 @@ export class SubscriptionError extends Error {
   }
 }
 
+/** Maximum queued delta batches before a slow watcher is closed. */
+export const DEFAULT_MAX_BUFFERED_DELTA_BATCHES = 128;
+
 export class RoomsSubscriptionService {
   private nextId = 1;
   private readonly sessions = new Map<string, Session>();
 
-  constructor(private readonly source: SubscriptionSource, private readonly maxBuffered = 128) {
+  constructor(private readonly source: SubscriptionSource, private readonly maxBuffered = DEFAULT_MAX_BUFFERED_DELTA_BATCHES) {
     if (!Number.isSafeInteger(maxBuffered) || maxBuffered < 1) throw new RangeError("maxBuffered must be positive");
   }
 

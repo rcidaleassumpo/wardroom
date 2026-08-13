@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
 import { randomBytes } from "node:crypto";
 import { mkdirSync, chmodSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
+import { arch, platform } from "node:process";
 import { EventEmitter } from "node:events";
 import { encodeEnrollment, HostFrameDecoder, HOST_TYPES, decodeReady, type HostHelloAck, type HostOutput } from "./codec.js";
 import { RuntimeHostClient } from "./client.js";
@@ -81,7 +83,7 @@ export class RuntimeHostSupervisor extends EventEmitter {
     mkdirSync(this.spec.stateDir, { recursive: true, mode: 0o700 });
     chmodSync(this.spec.stateDir, 0o700);
     ensureRuntimeSocketDirectory(dirname(this.socketPath()));
-    const executable = this.spec.executable ?? join(dirname(fileURLToPath(import.meta.url)), "../../../../runtime-host-go/dist/rooms-runtime-host-darwin-arm64");
+    const executable = this.spec.executable ?? join(dirname(fileURLToPath(import.meta.url)), `../../../../runtime-host-go/dist/${runtimeHostBinaryName(platform, arch)}`);
     const statePath = this.statePath();
     const socketPath = this.socketPath();
     const child = spawn(executable, ["run", "--ring-bytes", String(this.spec.ringBytes ?? 262144), ...(this.spec.shell ? ["--shell", this.spec.shell] : [])], {
@@ -150,6 +152,10 @@ export class RuntimeHostSupervisor extends EventEmitter {
     client.on("exit", (value) => { this.state = "terminated"; this.emit("exit", value); this.emit("state", this.state); });
     client.on("close", () => { if (this.state === "running") { this.state = this.child?.exitCode === null ? "recovering" : "crashed"; this.emit("state", this.state); } });
   }
+}
+
+export function runtimeHostBinaryName(hostPlatform: NodeJS.Platform, hostArch: string): string {
+  return `rooms-runtime-host-${hostPlatform}-${hostArch === "x64" ? "amd64" : hostArch}`;
 }
 
 function redactHostStderr(value: string, secret: Uint8Array): string {

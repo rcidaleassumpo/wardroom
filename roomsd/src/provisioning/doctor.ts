@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
@@ -32,22 +33,13 @@ export function runRoomsDoctor(options: { stateDir?: string; installRoot?: strin
   check("toolchain_free.installed_runtime", () => { const release = verifyCurrentRelease(paths).manifest; if (!release.files.rooms || !release.files.roomsd || !release.files["rooms-runtime-host"]) throw new Error("release does not contain all native executables"); return "Rooms and roomsd SEA executables plus the Go host are installed"; });
   check("peer.trust_records", () => inspectPeerRecords(paths));
   checks.push({ name: "peer.reachability", status: "not_applicable", detail: "live reachability is checked by an explicit authenticated peer operation; doctor never opens a network connection" });
-  checks.push(inspectRelayProtocol(verifyCurrentRelease(paths).manifest, paths.federationRelayEndpoint));
+  check("relay.protocol", () => {
+    const stat = lstatSync(paths.federationRelayEndpoint);
+    if (!stat.isSocket() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new Error("private federation relay endpoint is unavailable or insecure");
+    return "authenticated SSH-stdio terminal streams and per-channel-home routing enabled";
+  });
   check("external_runtime_dependency_free", () => "service launches the installed executable directly with no shell or target toolchain");
   return { ok: checks.every(item => item.status !== "fail"), checks };
-}
-
-export function inspectRelayProtocol(manifest: Pick<ReleaseManifest, "features">, endpoint: string): Check {
-  if (manifest.features?.federation === false) {
-    return { name: "relay.protocol", status: "not_applicable", detail: "federation is omitted from this release" };
-  }
-  try {
-    const stat = lstatSync(endpoint);
-    if (!stat.isSocket() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new Error("private federation relay endpoint is unavailable or insecure");
-    return { name: "relay.protocol", status: "pass", detail: "authenticated SSH-stdio terminal streams and per-channel-home routing enabled" };
-  } catch (error) {
-    return { name: "relay.protocol", status: "fail", detail: error instanceof Error ? error.message : String(error) };
-  }
 }
 
 export function inspectStoreSchema(paths: RoomsPaths): string {

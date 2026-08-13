@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 syntax = "proto3";
 
 package rooms.v1;
@@ -12,6 +13,7 @@ service RoomsService {
   rpc ShowChannel(ShowChannelRequest) returns (ChannelResponse);
   rpc ListChannels(ListChannelsRequest) returns (ChannelsResponse);
   rpc UpdateChannelLabel(UpdateChannelLabelRequest) returns (ChannelResponse);
+  rpc UpdateChannelBroadcastPolicy(UpdateChannelBroadcastPolicyRequest) returns (ChannelResponse);
   rpc CloseChannel(CloseChannelRequest) returns (google.protobuf.Empty);
   rpc RegisterSession(RegisterSessionRequest) returns (SessionResponse);
   rpc Join(JoinRequest) returns (MembershipResponse);
@@ -27,6 +29,9 @@ service RoomsService {
   rpc GetMembershipHistory(GetMembershipHistoryRequest) returns (MembershipHistoryResponse);
   rpc GetSnapshot(GetSnapshotRequest) returns (SnapshotResponse);
   rpc GetEvents(GetEventsRequest) returns (EventsResponse);
+  rpc GetThreadLifecycle(GetThreadLifecycleRequest) returns (ThreadLifecycleResponse);
+  rpc ResolveThread(ThreadLifecycleMutationRequest) returns (ThreadLifecycleResponse);
+  rpc ReopenThread(ThreadLifecycleMutationRequest) returns (ThreadLifecycleResponse);
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc GetRecipients(GetRecipientsRequest) returns (RecipientsResponse);
 
@@ -50,15 +55,19 @@ enum MessageTerminalStatus { MESSAGE_TERMINAL_UNSPECIFIED = 0; MESSAGE_PENDING =
 enum LifecycleState { LIFECYCLE_STATE_UNSPECIFIED = 0; LIFECYCLE_RUNNING = 1; LIFECYCLE_SUSPENDING = 2; LIFECYCLE_SUSPENDED = 3; LIFECYCLE_RESUMING = 4; LIFECYCLE_DEGRADED = 5; }
 enum SuspendReason { SUSPEND_REASON_UNSPECIFIED = 0; SUSPEND_REQUESTED = 1; SUSPEND_MAINTENANCE = 2; SUSPEND_TRANSPORT_LOST = 3; }
 enum BlueprintState { BLUEPRINT_STATE_UNSPECIFIED = 0; BLUEPRINT_READY = 1; BLUEPRINT_PARTIAL = 2; BLUEPRINT_FAILED = 3; }
+enum DeliveryStatus { DELIVERY_STATUS_UNSPECIFIED = 0; DELIVERY_STATUS_DELIVERED = 1; DELIVERY_STATUS_QUEUED = 2; DELIVERY_STATUS_UNDELIVERABLE = 3; }
+enum RoomsErrorCode { ROOMS_ERROR_UNSPECIFIED = 0; ROOMS_ERROR_INVALID_ARGUMENT = 1; ROOMS_ERROR_NOT_FOUND = 2; ROOMS_ERROR_ALREADY_EXISTS = 3; ROOMS_ERROR_FAILED_PRECONDITION = 4; ROOMS_ERROR_PERMISSION_DENIED = 5; ROOMS_ERROR_UNAUTHENTICATED = 6; ROOMS_ERROR_RESOURCE_EXHAUSTED = 7; ROOMS_ERROR_UNAVAILABLE = 8; ROOMS_ERROR_UNIMPLEMENTED = 9; ROOMS_ERROR_INTERNAL = 10; }
+enum ThreadLifecycleState { THREAD_LIFECYCLE_UNSPECIFIED = 0; THREAD_OPEN = 1; THREAD_RESOLVED = 2; }
 
-message Channel { string id = 1; google.protobuf.Timestamp registered_at = 2; optional string owner_operator_session_id = 3; ChannelLifecycleState lifecycle_state = 4; optional google.protobuf.Timestamp closed_at = 5; optional string label = 6; }
+message Channel { string id = 1; google.protobuf.Timestamp registered_at = 2; optional string owner_operator_session_id = 3; ChannelLifecycleState lifecycle_state = 4; optional google.protobuf.Timestamp closed_at = 5; optional string label = 6; optional string broadcast_policy = 7; }
 message Session { string id = 1; google.protobuf.Timestamp registered_at = 2; optional google.protobuf.Timestamp ended_at = 3; optional string display_name = 4; optional string role = 5; optional string provider_thread_id = 6; }
 message Membership { string channel_id = 1; string session_id = 2; google.protobuf.Timestamp joined_at = 3; optional string role = 4; }
 message MembershipHistory { string channel_id = 1; string session_id = 2; google.protobuf.Timestamp joined_at = 3; optional google.protobuf.Timestamp left_at = 4; optional google.protobuf.Timestamp session_ended_at = 5; optional string role = 6; }
 message RosterEntry { string session_id = 1; optional string display_name = 2; google.protobuf.Timestamp joined_at = 3; optional string role = 4; }
 message Correlation { string request_id = 1; string deduplication_key = 2; string purpose = 3; optional string reply_to_event_id = 4; MessageExpectedHandling expected_handling = 5; MessageTerminalStatus terminal_status = 6; optional string origin_channel_id = 7; string origin_session_id = 8; optional string target_session_id = 9; }
 message MessageTarget { MessageTargetKind kind = 1; optional string session_id = 2; repeated string session_ids = 3; }
-message Message { string id = 1; optional string channel_id = 2; string sender_session_id = 3; string body = 4; MessageTarget target = 5; repeated string delivered_recipient_session_ids = 6; Correlation correlation = 7; google.protobuf.Timestamp occurred_at = 8; optional string sender_role = 9; }
+message Message { string id = 1; optional string channel_id = 2; string sender_session_id = 3; string body = 4; MessageTarget target = 5; repeated string delivered_recipient_session_ids = 6; Correlation correlation = 7; google.protobuf.Timestamp occurred_at = 8; optional string sender_role = 9; map<string, DeliveryStatus> recipient_statuses = 10; optional string reply_to_event_id = 11; optional string thread_root_event_id = 12; }
+message RoomsError { RoomsErrorCode code = 1; string message = 2; optional string domain_code = 3; }
 message Recipient { string event_id = 1; string session_id = 2; google.protobuf.Timestamp delivered_at = 3; }
 message Change { string channel_id = 1; optional string event_id = 2; Message event = 3; Channel channel = 4; repeated MembershipHistory membership_history = 5; repeated Session sessions = 6; reserved 7, 8; optional string notification_id = 9; optional string cursor = 10; }
 message Snapshot { Channel channel = 1; repeated RosterEntry roster = 2; repeated Session sessions = 3; repeated Membership memberships = 4; repeated MembershipHistory membership_history = 5; reserved 6, 7; optional string cursor = 8; }
@@ -67,20 +76,23 @@ message CreateChannelRequest { RequestContext context = 1; string channel_name =
 message ShowChannelRequest { RequestContext context = 1; string channel_id = 2; }
 message ListChannelsRequest { RequestContext context = 1; }
 message UpdateChannelLabelRequest { RequestContext context = 1; string channel_id = 2; optional string label = 3; }
+message UpdateChannelBroadcastPolicyRequest { RequestContext context = 1; string channel_id = 2; string broadcast_policy = 3; }
 message CloseChannelRequest { RequestContext context = 1; string channel_id = 2; string authorized_by_session_id = 3; }
 message RegisterSessionRequest { RequestContext context = 1; string session_id = 2; optional string display_name = 3; optional string role = 4; optional string registrar_session_id = 5; }
 message JoinRequest { RequestContext context = 1; string channel_id = 2; string session_id = 3; optional string authorized_by_session_id = 4; reserved 5; }
 message LeaveRequest { RequestContext context = 1; string channel_id = 2; string session_id = 3; }
 message EndSessionRequest { RequestContext context = 1; string session_id = 2; }
 message ReplaceSessionRequest { RequestContext context = 1; string channel_id = 2; string session_id = 3; string replacement_session_id = 4; reserved 5; string authorized_by_session_id = 6; optional string reason = 7; }
-message SendRequest { RequestContext context = 1; optional string channel_id = 2; string body = 3; MessageTarget target = 4; Correlation correlation = 5; }
+message SendRequest { RequestContext context = 1; optional string channel_id = 2; string body = 3; MessageTarget target = 4; Correlation correlation = 5; optional string reply_to_event_id = 6; }
 message AuthenticateRequest { RequestContext context = 1; string credential = 2; }
 message IssueCredentialRequest { RequestContext context = 1; string session_id = 2; }
 message GetSessionsRequest { RequestContext context = 1; }
 message GetRosterRequest { RequestContext context = 1; string channel_id = 2; }
 message GetMembershipHistoryRequest { RequestContext context = 1; string channel_id = 2; }
 message GetSnapshotRequest { RequestContext context = 1; string channel_id = 2; }
-message GetEventsRequest { RequestContext context = 1; string channel_id = 2; optional string after_cursor = 3; optional string after_event_id = 4; }
+message GetEventsRequest { RequestContext context = 1; optional string channel_id = 2; optional string after_cursor = 3; optional string after_event_id = 4; optional string session_id = 5; optional uint32 limit = 6; optional string event_id = 7; optional string reply_to_event_id = 8; }
+message GetThreadLifecycleRequest { RequestContext context = 1; string thread_root_event_id = 2; optional string channel_id = 3; }
+message ThreadLifecycleMutationRequest { RequestContext context = 1; string thread_root_event_id = 2; optional string channel_id = 3; }
 message SearchRequest { RequestContext context = 1; string query = 2; SearchScopeKind scope = 3; optional string channel_id = 4; uint32 limit = 5; }
 message GetRecipientsRequest { RequestContext context = 1; string event_id = 2; }
 message WatchRequest { RequestContext context = 1; string channel_id = 2; optional string after_cursor = 3; optional string acknowledged_cursor = 4; }
@@ -102,7 +114,9 @@ message SessionsResponse { repeated Session sessions = 1; }
 message RosterResponse { repeated RosterEntry roster = 1; }
 message MembershipHistoryResponse { repeated MembershipHistory membership_history = 1; }
 message SnapshotResponse { Snapshot snapshot = 1; }
-message EventsResponse { repeated Message events = 1; optional string cursor = 2; }
+message EventsResponse { repeated Message events = 1; optional string cursor = 2; optional string oldest_cursor = 3; bool has_more = 4; }
+message ThreadLifecycle { string thread_root_event_id = 1; string channel_id = 2; ThreadLifecycleState state = 3; optional google.protobuf.Timestamp resolved_at = 4; optional string resolved_by_session_id = 5; optional google.protobuf.Timestamp reopened_at = 6; optional string reopened_by_session_id = 7; optional google.protobuf.Timestamp updated_at = 8; }
+message ThreadLifecycleResponse { ThreadLifecycle thread = 1; optional string cursor = 2; }
 message SearchResponse { repeated Message events = 1; }
 message RecipientsResponse { repeated Recipient recipients = 1; }
 message StatusResponse { LifecycleStatus status = 1; }

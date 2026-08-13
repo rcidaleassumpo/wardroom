@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { chmodSync, existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RoomsRepository } from "../storage/repository.js";

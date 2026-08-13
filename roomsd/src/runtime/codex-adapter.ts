@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import type { AllowlistedLaunchConfig, LayoutMetadata } from "../blueprints/resumable.js";
 import type { ProviderConversationPort, RuntimeGenerationPort, TeardownFence } from "../lifecycle/suspend-resume.js";
@@ -8,6 +9,13 @@ export type SpawnCodexConversation = (executable: string, args: readonly string[
 export type LaunchAllowlist = (input: { executable: string; args: readonly string[]; cwd: string }) => boolean;
 export type TeardownFenceVerifier = (token: string) => boolean | Promise<boolean>;
 export interface FenceTokenStore { verifyFenceToken(token: string): boolean }
+export interface ProviderExecutableRegistration { name: "codex" | "claude" | "grok"; executable: string }
+export interface HeadlessProviderContract {
+  provider: "claude" | "grok";
+  executable: string;
+  arguments(conversationId: string, prompt: string): readonly string[];
+  reply(stdout: string): string;
+}
 export interface RuntimeOwnershipStore { read(priorSessionId: string, generation: number): { runtimeId: string; pid: number; startIdentity: string } | null; readByRuntime(runtimeId: string): { priorSessionId: string; generation: number; pid: number; startIdentity: string } | null; claim(priorSessionId: string, generation: number, runtimeId: string): boolean; write(priorSessionId: string, generation: number, value: { runtimeId: string; pid: number; startIdentity: string }): void; remove(priorSessionId: string, generation: number, runtimeId?: string): void }
 export class MemoryRuntimeOwnershipStore implements RuntimeOwnershipStore {
   private readonly values = new Map<string, { runtimeId: string; pid: number; startIdentity: string }>();
@@ -17,41 +25,94 @@ export class MemoryRuntimeOwnershipStore implements RuntimeOwnershipStore {
   write(priorSessionId: string, generation: number, value: { runtimeId: string; pid: number; startIdentity: string }) { this.values.set(`${priorSessionId}:${generation}`, value); }
   remove(priorSessionId: string, generation: number, runtimeId?: string) { const key = `${priorSessionId}:${generation}`; const current = this.values.get(key); if (current && (runtimeId == null || current.runtimeId === runtimeId)) this.values.delete(key); }
 }
-export function createCodexAdapters(store: FenceTokenStore, options: { runtimeOwnership?: RuntimeOwnershipStore; spawnCodex?: SpawnCodex; spawnConversation?: SpawnCodexConversation; allowlist?: LaunchAllowlist }): { runtime: CodexRuntimeAdapter; provider: ProviderConversationAdapter } {
+export function createCodexAdapters(store: FenceTokenStore, options: { runtimeOwnership?: RuntimeOwnershipStore; spawnCodex?: SpawnCodex; spawnConversation?: SpawnCodexConversation; allowlist?: LaunchAllowlist; providerRegistrations?: readonly ProviderExecutableRegistration[] }): { runtime: CodexRuntimeAdapter; provider: ProviderConversationAdapter } {
   const verify = (token: string) => store.verifyFenceToken(token);
   const codex = new CodexConversationAdapter(options.allowlist, verify, options.spawnConversation);
+  const headless = registeredHeadlessProviderContracts(options.providerRegistrations ?? [
+    { name: "claude", executable: "claude" },
+    { name: "grok", executable: "grok" },
+  ]).map(contract => new HeadlessProviderConversationAdapter(contract, verify, options.spawnConversation));
   return {
     runtime: new CodexRuntimeAdapter(options.spawnCodex, options.allowlist, verify, options.runtimeOwnership ?? new MemoryRuntimeOwnershipStore()),
-    provider: new ProviderConversationAdapter(codex),
+    provider: new ProviderConversationAdapter(codex, headless),
   };
 }
 
-/** Provider-neutral resume dispatcher; legacy Codex blueprints remain the default. */
+export function registeredHeadlessProviderContracts(registrations: readonly ProviderExecutableRegistration[]): HeadlessProviderContract[] {
+  const contracts: HeadlessProviderContract[] = [];
+  for (const registration of registrations) {
+    if (registration.name === "claude") contracts.push({
+      provider: "claude" as const,
+      executable: registration.executable,
+      arguments: (conversationId: string, prompt: string) => ["-p", prompt, "--resume", conversationId, "--output-format", "json"],
+      reply: (stdout: string) => jsonReply(stdout, "result", "Claude"),
+    });
+    if (registration.name === "grok") contracts.push({
+      provider: "grok" as const,
+      executable: registration.executable,
+      arguments: (conversationId: string, prompt: string) => ["--no-auto-update", "-p", prompt, "--resume", conversationId, "--output-format", "json"],
+      reply: (stdout: string) => jsonReply(stdout, "text", "Grok"),
+    });
+  }
+  return contracts;
+}
+
+/** Provider-neutral resume dispatcher; behavior comes from registered contracts. */
 export class ProviderConversationAdapter implements ProviderConversationPort {
-  constructor(private readonly codex: CodexConversationAdapter, private readonly spawnClaude: SpawnCodexConversation = (executable, args, cwd) => spawn(executable, [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] })) {}
-  stop(ref: any, fence: TeardownFence) { return this.codex.stop(ref, fence); }
-  stopRollback(ref: any, fence: TeardownFence) { return this.codex.stopRollback(ref, fence); }
+  private readonly headless: Map<string, HeadlessProviderConversationAdapter>;
+  constructor(private readonly codex: CodexConversationAdapter, headless: readonly HeadlessProviderConversationAdapter[] = []) {
+    this.headless = new Map(headless.map(driver => [driver.provider, driver]));
+  }
+  stop(ref: any, fence: TeardownFence) { return this.driver(ref).stop(ref, fence); }
+  stopRollback(ref: any, fence: TeardownFence) { return this.driver(ref).stopRollback(ref, fence); }
   async validateResume(ref: any): Promise<void> {
     if (typeof ref?.conversationId !== "string" || !ref.conversationId.trim()) throw new Error("provider resume identity is missing");
     const descriptor = ref.resumeDescriptor as { provider?: string; cwd?: string; prompt?: string } | null;
     if (!descriptor || typeof descriptor.cwd !== "string" || typeof descriptor.prompt !== "string") throw new Error("provider resume descriptor is invalid");
-    if (descriptor.provider && !["codex", "claude"].includes(descriptor.provider)) throw new Error(`unsupported provider resume adapter ${descriptor.provider}`);
-    if (descriptor.provider === "claude") {
-      const child = this.spawnClaude("claude", ["--resume", ref.conversationId, "-p", ""], descriptor.cwd);
-      const output = await Promise.race([
-        collect(child),
-        new Promise<never>((_, reject) => { const timer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} reject(new Error("Claude resume validation timed out")); }, 30_000); timer.unref(); }),
-      ]);
-      if (child.exitCode !== 0) throw new Error(`Claude resume validation failed: ${output.stderr || output.stdout}`);
-    }
+    this.driver(ref);
   }
   async resume(ref: any, generation: number): Promise<void> {
-    const descriptor = ref.resumeDescriptor as { provider?: string; cwd?: string; prompt?: string } | null;
-    if (descriptor?.provider !== "claude") return this.codex.resume(ref, generation);
-    if (typeof descriptor.cwd !== "string" || typeof descriptor.prompt !== "string") throw new Error("invalid Claude resume descriptor");
-    const child = this.spawnClaude("claude", ["--resume", ref.conversationId, "-p", descriptor.prompt], descriptor.cwd);
-    const output = await collect(child);
-    if (child.exitCode !== 0) throw new Error(`Claude resume exited ${child.exitCode}: ${output.stderr}`);
+    await this.resumeWithReply(ref, generation);
+  }
+  resumeWithReply(ref: any, generation: number): Promise<string> {
+    return this.driver(ref).resumeWithReply(ref, generation);
+  }
+  private driver(ref: any): CodexConversationAdapter | HeadlessProviderConversationAdapter {
+    const provider = (ref?.resumeDescriptor as { provider?: string } | null)?.provider ?? "codex";
+    if (provider === "codex") return this.codex;
+    const driver = this.headless.get(provider);
+    if (!driver) throw new Error(`unsupported provider resume adapter ${provider}`);
+    return driver;
+  }
+}
+
+export class HeadlessProviderConversationAdapter implements ProviderConversationPort {
+  private readonly active = new Map<string, { process: ChildProcess; generation: number }>();
+  readonly provider: "claude" | "grok";
+  constructor(private readonly contract: HeadlessProviderContract, private readonly verifyFence: TeardownFenceVerifier = () => false, private readonly spawnConversation: SpawnCodexConversation = (executable, args, cwd) => spawn(executable, [...args], { cwd, stdio: ["ignore", "pipe", "pipe"] })) { this.provider = contract.provider; }
+  async resume(ref: any, generation: number): Promise<void> { await this.resumeWithReply(ref, generation); }
+  async resumeWithReply(ref: any, generation: number): Promise<string> {
+    const descriptor = ref?.resumeDescriptor as { provider?: string; cwd?: string; prompt?: string } | null;
+    if (typeof ref?.conversationId !== "string" || !ref.conversationId.trim() || descriptor?.provider !== this.provider || typeof descriptor.cwd !== "string" || typeof descriptor.prompt !== "string" || !descriptor.prompt) throw new Error(`invalid ${this.provider} resume descriptor`);
+    if (this.active.has(ref.conversationId)) throw new Error(`${this.provider} conversation is already active`);
+    const child = this.spawnConversation(this.contract.executable, this.contract.arguments(ref.conversationId, descriptor.prompt), descriptor.cwd);
+    this.active.set(ref.conversationId, { process: child, generation });
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const output = await Promise.race([collect(child), new Promise<never>((_, reject) => { timer = setTimeout(async () => { await terminate(child); reject(new Error(`${this.provider} resume timed out`)); }, 120_000); })]);
+      if (child.exitCode !== 0) throw new Error(`${this.provider} resume exited ${child.exitCode}: ${output.stderr}`);
+      return this.contract.reply(output.stdout);
+    } finally { if (timer) clearTimeout(timer); this.active.delete(ref.conversationId); }
+  }
+  async stop(ref: any, fence: TeardownFence): Promise<void> { await this.stopActive(ref, fence); }
+  async stopRollback(ref: any, fence: TeardownFence): Promise<void> { await this.stopActive(ref, fence); }
+  private async stopActive(ref: any, fence: TeardownFence): Promise<void> {
+    const active = this.active.get(ref.conversationId);
+    if (!active) return;
+    if (!fence.token || !await this.verifyFence(fence.token)) throw new Error("stale teardown fence");
+    await fence.assertCurrent();
+    await terminate(active.process);
+    this.active.delete(ref.conversationId);
   }
 }
 
@@ -62,7 +123,7 @@ export class CodexRuntimeAdapter implements RuntimeGenerationPort {
   constructor(private readonly spawnCodex: SpawnCodex = (executable, args, cwd) => ({ process: spawn(executable, [...args], { cwd, stdio: "ignore" }), runtimeId: `runtime-${Date.now()}-${Math.random().toString(16).slice(2)}` }), private readonly allowlist: LaunchAllowlist = defaultLaunchAllowlist, private readonly verifyFence: TeardownFenceVerifier = () => false, private readonly ownership: RuntimeOwnershipStore = new MemoryRuntimeOwnershipStore()) {}
 
   async launch(input: { channelId: string; priorSessionId: string; generation: number; launch: AllowlistedLaunchConfig; layout: LayoutMetadata; adapterKind: string }): Promise<{ sessionId: string; runtimeId: string }> {
-    if (!["codex", "claude", "grok"].includes(input.adapterKind)) throw new Error(`unsupported runtime adapter ${input.adapterKind}`);
+    if (!["codex", "claude", "grok", "agy"].includes(input.adapterKind)) throw new Error(`unsupported runtime adapter ${input.adapterKind}`);
     if (!this.allowlist(input.launch)) throw new Error("launch configuration is not allowlisted");
     const existing = this.processes.get(input.priorSessionId);
     if (existing && existing.generation >= input.generation) throw new Error("runtime generation is already active");
@@ -81,19 +142,28 @@ export class CodexRuntimeAdapter implements RuntimeGenerationPort {
   }
 
   async stop(input: { sessionId: string; runtimeId: string; fence: TeardownFence }): Promise<void> {
-    const entry = [...this.processes.values()].find(value => value.runtimeId === input.runtimeId);
+    const processEntry = [...this.processes.entries()].find(([, value]) => value.runtimeId === input.runtimeId);
     const owned = this.ownership.readByRuntime(input.runtimeId);
-    if (!owned) throw new Error("runtime ownership is not durably proven");
+    // Missing ownership means the generation is already gone (mass terminate,
+    // prior stop, or never claimed). Ensure-stopped is a successful no-op.
+    if (!owned) {
+      if (processEntry) this.processes.delete(processEntry[0]);
+      return;
+    }
     if (!await this.verifyFence(input.fence.token)) throw new Error("stale teardown fence");
     await input.fence.assertCurrent();
-    if (entry) await terminate(entry.process); else await terminatePid(owned.pid, owned.startIdentity);
+    if (processEntry) await terminate(processEntry[1].process); else await terminatePid(owned.pid, owned.startIdentity);
     this.ownership.remove(owned.priorSessionId, owned.generation);
+    if (processEntry) this.processes.delete(processEntry[0]);
   }
 
   async stopGeneration(input: { priorSessionId: string; generation: number; fence: TeardownFence }): Promise<void> {
     const entry = this.processes.get(input.priorSessionId);
     const owned = this.ownership.read(input.priorSessionId, input.generation);
-    if (!owned) throw new Error("runtime ownership is not durably proven");
+    if (!owned) {
+      if (entry && entry.generation === input.generation) this.processes.delete(input.priorSessionId);
+      return;
+    }
     if (entry && entry.generation !== input.generation) throw new Error("runtime generation is not owned by this lifecycle");
     if (!await this.verifyFence(input.fence.token)) throw new Error("stale teardown fence");
     await input.fence.assertCurrent();
@@ -190,6 +260,15 @@ function collect(process: ChildProcess): Promise<{ stdout: string; stderr: strin
     process.once("error", reject);
     process.once("close", () => overflow ? reject(new Error("codex resume output exceeded limit")) : resolve({ stdout, stderr }));
   });
+}
+
+function jsonReply(stdout: string, field: string, provider: string): string {
+  let value: unknown;
+  try { value = JSON.parse(stdout); }
+  catch { throw new Error(`${provider} resume returned invalid JSON`); }
+  const reply = value && typeof value === "object" ? (value as Record<string, unknown>)[field] : null;
+  if (typeof reply !== "string" || !reply.trim()) throw new Error(`${provider} resume returned no agent message`);
+  return reply;
 }
 
 function defaultLaunchAllowlist(input: { executable: string; args: readonly string[]; cwd: string }): boolean {
