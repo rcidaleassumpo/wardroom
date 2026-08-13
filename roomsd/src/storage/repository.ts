@@ -574,11 +574,11 @@ export class RoomsRepository {
     return this.rows("SELECT id FROM sessions WHERE external_id = ? AND ended_at IS NULL", externalId).map(row => asString(row.id));
   }
 
-  registerSession(channelId: string, sessionId: string, role: SessionRole, externalId: string | null = null, deliveryMode: SessionDeliveryMode | null = null): { session: Session; membership: Membership; idempotent: boolean } {
+  registerSession(channelId: string, sessionId: string, role: SessionRole, externalId: string | null = null, deliveryMode: SessionDeliveryMode | null = null, displayName: string | null = null): { session: Session; membership: Membership; idempotent: boolean } {
     return this.command(() => {
       if (!this.currentChannel(channelId)) throw new RoomsStoreError("channelNotFound");
       const existing = this.currentSession(sessionId);
-      const sessionReceipt = existing ? null : this.insertSession({ id: sessionId, role, externalId, deliveryMode });
+      const sessionReceipt = existing ? null : this.insertSession({ id: sessionId, displayName, role, externalId, deliveryMode });
       // Binding an existing mailbox to a caller is idempotent, but never silently reassigns it.
       if (existing && externalId) {
         const current = this.one("SELECT external_id FROM sessions WHERE id = ?", sessionId)?.external_id as string | null;

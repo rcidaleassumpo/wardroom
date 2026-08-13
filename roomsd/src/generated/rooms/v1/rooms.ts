@@ -137,6 +137,7 @@ export interface LaunchSessionRequest {
   context?: RequestContext;
   channelId: string;
   sessionId: string;
+  displayName?: string | null;
   provider: LocalProviderName;
   role: Exclude<SessionRole, "operator">;
   prompt: string;

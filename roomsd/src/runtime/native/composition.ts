@@ -27,6 +27,7 @@ import { providerModelCatalog } from "../../providers/model-catalog.js";
 import { captureProviderReplyScanState, scanProviderFinalReply, supportsProviderFinalReply, type ProviderReplyScanState } from "../provider-final-reply.js";
 import { ProviderReplyBridge } from "../provider-reply-bridge.js";
 import { prepareManagedProviderLaunch } from "../provider-managed-launch.js";
+import { composeRoomsAgentBriefing } from "../../cli/agent-briefing.js";
 
 const now = () => new Date().toISOString();
 export const DEFAULT_QUERY_LIMIT = 50;
@@ -204,7 +205,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     },
     async registerSession(request: any): Promise<any> {
       if (request.channelId) {
-        const receipt = database.registerSession(request.channelId, request.sessionId, request.role ?? "worker", request.externalId ?? null, request.deliveryMode ?? null);
+        const receipt = database.registerSession(request.channelId, request.sessionId, request.role ?? "worker", request.externalId ?? null, request.deliveryMode ?? null, request.displayName ?? null);
         return { session: database.currentSession(request.sessionId), membership: database.roster(request.channelId).find((item: any) => item.sessionId === request.sessionId), idempotent: receipt.idempotent };
       }
       return { session: database.currentSession(request.sessionId) ?? database.insertSession({ id: request.sessionId, displayName: request.displayName ?? null, role: request.role, deliveryMode: request.deliveryMode ?? null }).changes[0]?.payload };
@@ -408,7 +409,12 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       }
       const providerArguments = Array.isArray(request.providerArguments) ? request.providerArguments.map(String) : [];
       const translatedArguments = providerLaunchArguments(request.provider, registration.adapter, request.launchOptions ?? {}, registration.defaults, providerArguments);
-      const prompt = `You are a Rooms session ${request.sessionId}.\n\n${request.prompt}`;
+      const prompt = composeRoomsAgentBriefing({
+        sessionId: request.sessionId,
+        displayName: request.displayName ?? null,
+        channel: request.channelId,
+        goal: request.prompt,
+      });
       const managedLaunch = prepareManagedProviderLaunch({
         adapterKind: registration.adapter,
         arguments: translatedArguments,
@@ -419,7 +425,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       const promptScan = managedLaunch.providerThreadId
         ? captureProviderReplyScanState(registration.adapter, managedLaunch.providerThreadId)
         : null;
-      database.registerSession(request.channelId, request.sessionId, role, null, "runtime");
+      database.registerSession(request.channelId, request.sessionId, role, null, "runtime", request.displayName ?? null);
       let launched: any;
       try {
         launched = await runtimeService.create({

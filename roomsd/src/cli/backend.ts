@@ -18,7 +18,7 @@ export interface SessionCreateInput {
   command?: string[];
   providerThreadId?: string | null;
 }
-export interface SessionRegisterInput { channel: string; name: string; role: "operator" | "planner" | "worker" | "reviewer"; externalId: string | null; deliveryMode?: "runtime" | "log"; }
+export interface SessionRegisterInput { channel: string; name: string; displayName?: string | null; role: "operator" | "planner" | "worker" | "reviewer"; externalId: string | null; deliveryMode?: "runtime" | "log"; }
 export interface SessionRoleInput { channel: string; sessionId: string; role: "planner" | "worker" | "reviewer"; credential: string; }
 export interface SessionListInput { includeEnded: boolean; }
 

@@ -658,7 +658,8 @@ async function runRoomsSession(provider: RoomsProvider, args: readonly string[],
     await backend.createChannel({ name: channel, credential });
     createdChannel = true;
   }
-  await backend.registerSession({ channel, name: session, role: (flags.get("role") ?? "worker") as "operator" | "planner" | "worker" | "reviewer", externalId: null });
+  const displayName = flags.get("display-name") ?? null;
+  await backend.registerSession({ channel, name: session, displayName, role: (flags.get("role") ?? "worker") as "operator" | "planner" | "worker" | "reviewer", externalId: null });
   const registration = registeredProvider(provider, flags.get("state-dir"));
   const providerArgs = providerLaunchArguments(provider, registration.adapter, launchOptions(flags), registration.defaults, providerArguments(provider, args, flags));
   const executable = registration.executable;
@@ -683,7 +684,7 @@ async function runRoomsSession(provider: RoomsProvider, args: readonly string[],
       credential,
       channel,
       session,
-      prompt: composeRoomsAgentBriefing({ sessionId: session, channel, goal, peers }),
+      prompt: composeRoomsAgentBriefing({ sessionId: session, displayName, channel, goal, peers }),
     });
   }
   // Creation is operator-authorized, but the interactive controller belongs
