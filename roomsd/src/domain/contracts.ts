@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export type SessionRole = "operator" | "planner" | "worker" | "reviewer";
 export type SessionDeliveryMode = "runtime" | "log";
 export type ChannelBroadcastPolicy = "all" | "privileged";

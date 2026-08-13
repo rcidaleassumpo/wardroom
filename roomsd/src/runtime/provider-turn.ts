@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { closeSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +24,7 @@ export type ProviderTurn = {
 
 export type TranscriptLine = {
   timestamp?: string;
+  created_at?: string;
   ts?: string;
   type?: string;
   phase?: string;
@@ -49,8 +51,11 @@ export function resolveProviderTurn(input: {
   if (!input.alive) return { phase: null, reason: "runtime-not-live", updatedAt: null };
   if (!input.lastDeliverAt) return { phase: "idle", reason: "awaiting-input", updatedAt: null };
 
-  const afterDeliver = input.transcriptLines.filter((line) => {
-    const at = line.timestamp || line.ts;
+  const transcriptLines = input.adapterKind === "gemini"
+    ? input.transcriptLines.flatMap(expandGeminiLine)
+    : input.transcriptLines;
+  const afterDeliver = transcriptLines.filter((line) => {
+    const at = line.timestamp || line.created_at || line.ts;
     return Boolean(at && at >= input.lastDeliverAt!);
   });
 
@@ -63,8 +68,115 @@ export function resolveProviderTurn(input: {
   if (input.adapterKind === "grok") {
     return resolveGrokTurn(afterDeliver, input.lastDeliverAt);
   }
+  if (input.adapterKind === "agy") {
+    return resolveAgyTurn(afterDeliver, input.lastDeliverAt);
+  }
+  if (input.adapterKind === "gemini") {
+    return resolveGeminiTurn(afterDeliver, input.lastDeliverAt);
+  }
 
   return { phase: "unsupported", reason: "provider-turn-unsupported", updatedAt: input.lastDeliverAt };
+}
+
+function resolveAgyTurn(lines: readonly TranscriptLine[], lastDeliverAt: string): ProviderTurn {
+  let phase: ProviderTurnPhase = "busy";
+  let reason = "prompt-delivered";
+  let updatedAt = lastDeliverAt;
+  for (const line of lines) {
+    const at = line.created_at || line.timestamp || line.ts || lastDeliverAt;
+    const record = line as TranscriptLine & { source?: string; status?: string; content?: unknown; tool_calls?: unknown[] };
+    if (record.status === "ERROR" || record.status === "FAILED") {
+      phase = "idle";
+      reason = "provider_error";
+      updatedAt = at;
+      continue;
+    }
+    if (line.type === "USER_INPUT") {
+      phase = "thinking";
+      reason = "user_input";
+      updatedAt = at;
+      continue;
+    }
+    if (line.type === "RUN_COMMAND" || line.type === "VIEW_FILE" || line.type === "WRITE_FILE") {
+      phase = "tool";
+      reason = String(line.type).toLowerCase();
+      updatedAt = at;
+      continue;
+    }
+    if (line.type !== "PLANNER_RESPONSE" || record.source !== "MODEL") continue;
+    if (Array.isArray(record.tool_calls) && record.tool_calls.length > 0) {
+      phase = "tool";
+      reason = "tool_call";
+    } else if (record.status === "DONE" && typeof record.content === "string" && record.content.trim()) {
+      phase = "idle";
+      reason = "planner_response_done";
+    } else {
+      phase = "streaming";
+      reason = "planner_response";
+    }
+    updatedAt = at;
+  }
+  return { phase, reason, updatedAt };
+}
+
+function resolveGeminiTurn(lines: readonly TranscriptLine[], lastDeliverAt: string): ProviderTurn {
+  let phase: ProviderTurnPhase = "busy";
+  let reason = "prompt-delivered";
+  let updatedAt = lastDeliverAt;
+  for (const line of lines) {
+    const at = line.timestamp || line.created_at || line.ts || lastDeliverAt;
+    const record = line as TranscriptLine & { content?: unknown; toolCalls?: unknown[] };
+    if (line.type === "user") {
+      phase = "thinking";
+      reason = "user";
+      updatedAt = at;
+      continue;
+    }
+    if (line.type === "error") {
+      phase = "idle";
+      reason = "provider_error";
+      updatedAt = at;
+      continue;
+    }
+    if (line.type !== "gemini") continue;
+    if (Array.isArray(record.toolCalls) && record.toolCalls.length > 0) {
+      phase = "tool";
+      reason = "tool_call";
+    } else if (geminiContentText(record.content)) {
+      phase = "idle";
+      reason = "gemini_response";
+    } else {
+      phase = "streaming";
+      reason = "gemini_output";
+    }
+    updatedAt = at;
+  }
+  return { phase, reason, updatedAt };
+}
+
+function expandGeminiLine(line: TranscriptLine): TranscriptLine[] {
+  if (typeof line.type === "string") return [line];
+  const record = line as TranscriptLine & {
+    $set?: { messages?: unknown };
+    $push?: { messages?: unknown };
+  };
+  return [...geminiTranscriptLines(record.$set?.messages), ...geminiTranscriptLines(record.$push?.messages)];
+}
+
+function geminiTranscriptLines(value: unknown): TranscriptLine[] {
+  const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return values.filter((item): item is TranscriptLine => item !== null && typeof item === "object" && !Array.isArray(item));
+}
+
+function geminiContentText(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!Array.isArray(value)) return null;
+  const text = value.flatMap((part) => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) return [];
+    const candidate = (part as { text?: unknown }).text;
+    return typeof candidate === "string" && candidate.trim() ? [candidate.trim()] : [];
+  }).join("\n\n");
+  return text || null;
 }
 
 function resolveCodexTurn(lines: readonly TranscriptLine[], lastDeliverAt: string): ProviderTurn {
@@ -251,6 +363,12 @@ export function loadProviderTranscriptLines(
     // stored on the runtime at launch. Never scan for a global newest file.
     return loadGrokEventLines(homeDirectory, providerThreadId);
   }
+  if (adapterKind === "agy") {
+    return readJsonlTail(join(homeDirectory, ".gemini", "antigravity-cli", "brain", providerThreadId, ".system_generated", "logs", "transcript.jsonl"));
+  }
+  if (adapterKind === "gemini") {
+    return loadGeminiLines(providerThreadId, homeDirectory);
+  }
   return [];
 }
 
@@ -281,6 +399,21 @@ function loadClaudeLines(providerThreadId: string, homeDirectory: string): Trans
   }
   const root = join(homeDirectory, ".claude", "projects");
   const match = findTranscriptFile(root, (path) => path.endsWith(`${providerThreadId}.jsonl`) || path.includes(`/${providerThreadId}.jsonl`));
+  if (match) pathCache.set(cacheKey, { path: match, checkedAt: Date.now() });
+  return match ? readJsonlTail(match) : [];
+}
+
+function loadGeminiLines(providerThreadId: string, homeDirectory: string): TranscriptLine[] {
+  const cacheKey = `gemini:${providerThreadId}:${homeDirectory}`;
+  const cached = pathCache.get(cacheKey);
+  if (cached && Date.now() - cached.checkedAt < PATH_CACHE_MS) {
+    return readJsonlTail(cached.path);
+  }
+  const root = join(homeDirectory, ".gemini", "tmp");
+  const match = findTranscriptFile(root, (_path, firstLine) => {
+    try { return (JSON.parse(firstLine) as { sessionId?: unknown }).sessionId === providerThreadId; }
+    catch { return false; }
+  });
   if (match) pathCache.set(cacheKey, { path: match, checkedAt: Date.now() });
   return match ? readJsonlTail(match) : [];
 }

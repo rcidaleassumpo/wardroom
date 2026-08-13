@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { lstatSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { ROOMS_PROTOCOL_MAX_VERSION } from "../api/protocol-compatibility.js";

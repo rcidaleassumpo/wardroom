@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
 import { execFileSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, relative, resolve } from "node:path";
 import { releasePaths, verifyCurrentRelease } from "./release.js";
 import { assertLocalStateModes } from "./local-state.js";
+import { defaultStateDir } from "./paths.js";
 import type { RoomsPaths } from "./paths.js";
 
 export type RoomsServiceCommand = "install" | "start" | "stop" | "restart" | "status" | "uninstall";
@@ -24,6 +26,7 @@ export function runRoomsService(command: RoomsServiceCommand, options: { stateDi
 export function installService(paths: RoomsPaths): unknown {
   const release = verifyCurrentRelease(paths);
   assertLocalStateModes(paths);
+  retireLegacyLaunchAgents();
   mkdirSync(paths.launchAgentDir, { recursive: true, mode: 0o700 });
   const plist = launchAgentPlist(paths, release.directory);
   writeAtomic(paths.launchAgentPlist, plist, 0o600);
@@ -54,6 +57,41 @@ export function serviceStatus(paths: RoomsPaths): Readonly<{ label: string; load
 }
 
 export function serviceTarget(paths: RoomsPaths, domain: string): string { return `${domain}/${paths.serviceLabel}`; }
+
+const LEGACY_SERVICE_LABELS = ["local.rooms.roomsd-ts", "local.rooms.planner-supervisor"] as const;
+const LEGACY_LOG_NAMES = [
+  "roomsd-ts.stdout.log", "roomsd-ts.stderr.log",
+  "planner-supervisor.stdout.log", "planner-supervisor.stderr.log",
+] as const;
+
+type LegacyCleanupOptions = Readonly<{
+  domain?: string;
+  launchAgentDir?: string;
+  stateDir?: string;
+  runLaunchctl?: (args: readonly string[], allowFailure?: boolean) => { ok: boolean; output: string; error: string };
+  removeFile?: (path: string) => void;
+}>;
+
+/** Retires exact pre-cutover jobs and logs without touching the canonical service. */
+export function retireLegacyLaunchAgents(options: LegacyCleanupOptions = {}): Readonly<{ labels: readonly string[]; files: readonly string[] }> {
+  const domain = options.domain ?? launchDomain();
+  const launchAgentDir = options.launchAgentDir ?? `${homedir()}/Library/LaunchAgents`;
+  const stateDir = options.stateDir ?? defaultStateDir();
+  const runLaunchctl = options.runLaunchctl ?? launchctl;
+  const removeFile = options.removeFile ?? unlinkSync;
+  const files = [
+    ...LEGACY_SERVICE_LABELS.map((label) => `${launchAgentDir}/${label}.plist`),
+    ...LEGACY_LOG_NAMES.map((name) => `${stateDir}/${name}`),
+  ];
+  for (const label of LEGACY_SERVICE_LABELS) {
+    const target = `${domain}/${label}`;
+    if (runLaunchctl(["print", target], true).ok) runLaunchctl(["bootout", target]);
+  }
+  for (const path of files) {
+    try { removeFile(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  return { labels: LEGACY_SERVICE_LABELS, files };
+}
 
 export function waitForServiceReady(
   paths: RoomsPaths,

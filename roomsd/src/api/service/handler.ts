@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type {
   AuthenticateRequest,
   AuthenticateResponse,
@@ -53,6 +54,13 @@ import type {
   RuntimeInputRequest, RuntimeResizeRequest, RuntimeSignalRequest, RuntimeTerminateRequest, RuntimeRecoverRequest,
   RuntimeDeliverMessageRequest, RuntimeEventsRequest, RuntimeResponse, RuntimeListResponse, RuntimeOperationResponse,
   RuntimeEventsResponse,
+  ChannelStateSnapshotsRequest, ChannelControlPagesRequest, UsageSeriesRequest,
+  RegisterChannelSessionRequest, RegisterChannelSessionResponse, LaunchSessionRequest, LaunchSessionResponse,
+  InspectSessionRequest, InspectSessionResponse, EndManagedSessionRequest, LocalSendMessageRequest, ResolveSessionRuntimeRequest, ResolveSessionRuntimeResponse,
+  LocalChannelLifecycleRequest, LocalChannelArchiveRequest, LocalChannelArchiveResponse, LocalChannelResumeOutcome,
+  LocalProviderRegistryResponse, LocalProviderWriteRequest, LocalProviderMutationResponse, LocalProviderRemoveRequest,
+  RotationSessionRequest, RotationAcknowledgeRequest, RotationCommitRequest, RotationCancelRequest,
+  RuntimeQuotaGetRequest, RuntimeQuotaSetRequest, RuntimeQuotaResetRequest,
 } from "../../generated/rooms/v1/rooms.js";
 import type { ChannelControlPages, ChannelStateSnapshots } from "../../storage/repository.js";
 import type { RotationAudit, RotationInspection } from "../../rotation/contracts.js";
@@ -81,15 +89,27 @@ export interface RoomsServiceHandler {
   getMembershipHistory(request: GetMembershipHistoryRequest): Promise<MembershipHistoryResponse>;
   getSnapshot(request: GetSnapshotRequest): Promise<SnapshotResponse>;
   /** Private local state query; Rooms stays neutral about consumer dispatch policy. */
-  channelStateSnapshots?(request: { channelIds: string[] }): Promise<ChannelStateSnapshots>;
+  channelStateSnapshots?(request: ChannelStateSnapshotsRequest): Promise<ChannelStateSnapshots>;
   /** Private local multi-channel control query; each channel keeps its own cursor. */
-  channelControlPages?(request: { channels: { channelId: string; afterCursor?: string }[]; sessionId: string; limit?: number }): Promise<ChannelControlPages>;
-  usageSeries?(request: { scope: "session" | "channel"; id: string; window: string; collect: boolean }): Promise<import("../../storage/usage-history.js").UsageSeries>;
-  rotationInspect?(request: { channelId: string; sessionId: string }): Promise<RotationInspection>;
-  rotationPrepare?(request: { channelId: string; sessionId: string }): Promise<RotationAudit>;
-  rotationAcknowledge?(request: { rotationId: string; nonce: string }): Promise<RotationAudit>;
-  rotationCommit?(request: { rotationId: string }): Promise<RotationAudit>;
-  rotationCancel?(request: { rotationId: string; reason: string }): Promise<RotationAudit>;
+  channelControlPages?(request: ChannelControlPagesRequest): Promise<ChannelControlPages>;
+  usageSeries?(request: UsageSeriesRequest): Promise<import("../../storage/usage-history.js").UsageSeries>;
+  registerChannelSession?(request: RegisterChannelSessionRequest): Promise<RegisterChannelSessionResponse>;
+  launchSession?(request: LaunchSessionRequest): Promise<LaunchSessionResponse>;
+  inspectSession?(request: InspectSessionRequest): Promise<InspectSessionResponse>;
+  endManagedSession?(request: EndManagedSessionRequest): Promise<void>;
+  sendMessage?(request: LocalSendMessageRequest): Promise<MessageResponse>;
+  suspendChannel?(request: LocalChannelLifecycleRequest): Promise<unknown>;
+  resumeChannel?(request: LocalChannelLifecycleRequest): Promise<LocalChannelResumeOutcome[]>;
+  archiveChannel?(request: LocalChannelArchiveRequest): Promise<LocalChannelArchiveResponse>;
+  listProviders?(request: { context?: import("../../generated/rooms/v1/rooms.js").RequestContext }): Promise<LocalProviderRegistryResponse>;
+  writeProvider?(request: LocalProviderWriteRequest): Promise<LocalProviderMutationResponse>;
+  removeProvider?(request: LocalProviderRemoveRequest): Promise<LocalProviderMutationResponse>;
+  resolveSessionRuntime?(request: ResolveSessionRuntimeRequest): Promise<ResolveSessionRuntimeResponse>;
+  rotationInspect?(request: RotationSessionRequest): Promise<RotationInspection>;
+  rotationPrepare?(request: RotationSessionRequest): Promise<RotationAudit>;
+  rotationAcknowledge?(request: RotationAcknowledgeRequest): Promise<RotationAudit>;
+  rotationCommit?(request: RotationCommitRequest): Promise<RotationAudit>;
+  rotationCancel?(request: RotationCancelRequest): Promise<RotationAudit>;
   getEvents(request: GetEventsRequest): Promise<EventsResponse>;
   getThreadLifecycle(request: GetThreadLifecycleRequest): Promise<ThreadLifecycleResponse>;
   resolveThread(request: ThreadLifecycleMutationRequest): Promise<ThreadLifecycleResponse>;
@@ -114,9 +134,9 @@ export interface RoomsServiceHandler {
   runtimeRecover(request: RuntimeRecoverRequest): Promise<RuntimeResponse>;
   runtimeDeliverMessage(request: RuntimeDeliverMessageRequest): Promise<RuntimeOperationResponse>;
   runtimeEvents(request: RuntimeEventsRequest): Promise<RuntimeEventsResponse>;
-  runtimeQuotaGet?(request: { machineId?: string }): Promise<{ quotas: unknown[] }>;
-  runtimeQuotaSet?(request: { machineId: string; limit: number }): Promise<{ quota: unknown }>;
-  runtimeQuotaReset?(request: { machineId: string }): Promise<{ quota: unknown }>;
+  runtimeQuotaGet?(request: RuntimeQuotaGetRequest): Promise<{ quotas: unknown[] }>;
+  runtimeQuotaSet?(request: RuntimeQuotaSetRequest): Promise<{ quota: unknown }>;
+  runtimeQuotaReset?(request: RuntimeQuotaResetRequest): Promise<{ quota: unknown }>;
 }
 
 export interface RoomsServiceHandlerDeps {
@@ -125,7 +145,7 @@ export interface RoomsServiceHandlerDeps {
 
 /** Wrap the generated service implementation without binding it to a transport. */
 export function createRoomsServiceHandler({ service }: RoomsServiceHandlerDeps): RoomsServiceHandler {
-  return {
+  const handler: RoomsServiceHandler = {
     createChannel: (request) => service.createChannel(request),
     showChannel: (request) => service.showChannel(request),
     listChannels: (request) => service.listChannels(request),
@@ -170,4 +190,14 @@ export function createRoomsServiceHandler({ service }: RoomsServiceHandlerDeps):
     runtimeDeliverMessage: (request) => service.runtimeDeliverMessage(request),
     runtimeEvents: (request) => service.runtimeEvents(request),
   };
+  for (const method of [
+    "channelStateSnapshots", "channelControlPages", "usageSeries", "registerChannelSession", "launchSession", "inspectSession",
+    "endManagedSession", "sendMessage", "suspendChannel", "resumeChannel", "archiveChannel", "listProviders", "writeProvider", "removeProvider",
+    "resolveSessionRuntime", "rotationInspect", "rotationPrepare", "rotationAcknowledge", "rotationCommit", "rotationCancel",
+    "runtimeAttachStream", "runtimeQuotaGet", "runtimeQuotaSet", "runtimeQuotaReset",
+  ] as const) {
+    const implementation = service[method] as ((request: never) => unknown) | undefined;
+    if (implementation) (handler as unknown as Record<string, unknown>)[method] = (request: never) => implementation.call(service, request);
+  }
+  return handler;
 }

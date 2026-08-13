@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { startNativeRooms, type NativeRoomsRuntime, type NativeRuntimeDependencies, type NativeRuntimeOptions } from "./runtime.js";
 import { createNativeComposition } from "./composition.js";
 import { prepareCanonicalStorePath } from "../../storage/store-migration.js";

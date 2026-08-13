@@ -17,10 +17,16 @@ describe("provider launch option contract", () => {
 
   it("validates options and translates Gemini through the agy adapter", () => {
     expect(providerLaunchArguments("gemini", "agy", { permissions: "headless", model: "gemini-2.5-pro" })).toEqual([
-      "--model", "gemini-2.5-pro", "--approval-mode", "yolo",
+      "--model", "gemini-2.5-pro", "--dangerously-skip-permissions",
     ]);
     expect(() => providerLaunchArguments("gemini", "agy", { reasoningEffort: "high" })).toThrow(/unsupported gemini launch option/);
     expect(() => providerLaunchArguments("gemini", "agy", { permissions: "unsafe" })).toThrow(/expected headless, manual/);
+  });
+
+  it("translates options for Google's Gemini CLI adapter", () => {
+    expect(providerLaunchArguments("gemini", "gemini", { permissions: "headless", model: "gemini-2.5-pro" })).toEqual([
+      "--model", "gemini-2.5-pro", "--skip-trust", "--approval-mode", "yolo",
+    ]);
   });
 
   it("merges stored defaults with per-launch overrides", () => {

@@ -61,7 +61,7 @@ describe("provider capability matrix", () => {
         mcpToolCall: true,
         details: {
           sessionLaunch: true,
-          nativeThreadDiscovery: false,
+          nativeThreadDiscovery: true,
           conversationResume: false,
           runtimeCommandResume: false,
           roomsSkillInstall: true,

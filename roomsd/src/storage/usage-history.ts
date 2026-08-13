@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { DatabaseSync } from "node:sqlite";
 import type { ProviderUsage } from "../runtime/provider-usage.js";
 import { RoomsStoreError } from "./repository.js";

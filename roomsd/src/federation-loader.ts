@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RoomsCLIBackend } from "./cli/backend.js";
 import type { RoomsRuntimeService } from "./runtime/service.js";
 import type { FederationCompositionPlug } from "./runtime/native/composition.js";

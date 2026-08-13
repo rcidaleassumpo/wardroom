@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { ROOM_PROVIDERS, type RoomsProvider } from "../cli/provider-registry.js";
 
 /** Normative capability paths from PROTOCOL.md section 8. */
@@ -104,7 +105,7 @@ function detailsFor(provider: RoomsProvider): ProviderCapabilityDetails {
     case "gemini":
       return {
         sessionLaunch: true,
-        nativeThreadDiscovery: false,
+        nativeThreadDiscovery: true,
         conversationResume: false,
         runtimeCommandResume: false,
         roomsSkillInstall: true,

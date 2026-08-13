@@ -51,7 +51,7 @@ describe("Rooms protobuf client contract", () => {
     expect(protoMethods).toEqual(ROOMS_PROTO_METHODS);
     expect(interfaceMethods(typescript, "RoomsProtoService")).toEqual(ROOMS_PROTO_METHODS);
     expect(interfaceMethods(typescript, "RoomsLocalServiceExtensions")).toEqual(ROOMS_LOCAL_EXTENSION_METHODS);
-    expect(new Set([...ROOMS_PROTO_METHODS, ...ROOMS_LOCAL_EXTENSION_METHODS]).size).toBe(43);
+    expect(new Set([...ROOMS_PROTO_METHODS, ...ROOMS_LOCAL_EXTENSION_METHODS]).size).toBe(67);
   });
 
   it("pins the GetEvents wire tags and TypeScript fields", () => {

@@ -71,6 +71,50 @@ describe("Rooms machine provider registry", () => {
       expect.objectContaining({ name: "gemini", adapter: "agy", executable: realpathSync(join(bin, "agy")) }),
     ]);
   });
+
+  it("selects Google's Gemini CLI adapter for a gemini executable", () => {
+    const root = mkdtempSync(join(tmpdir(), "rooms-providers-"));
+    const stateDir = join(root, "state");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    setupMachineIdentity(stateDir);
+    executable(join(bin, "gemini"));
+    expect(discoverProviders(stateDir, { PATH: bin }).providers).toEqual([
+      expect.objectContaining({ name: "gemini", adapter: "gemini", executable: realpathSync(join(bin, "gemini")) }),
+    ]);
+  });
+
+  it("updates the Gemini adapter when its executable family changes", () => {
+    const root = mkdtempSync(join(tmpdir(), "rooms-providers-"));
+    const stateDir = join(root, "state");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    setupMachineIdentity(stateDir);
+    executable(join(bin, "agy"));
+    executable(join(bin, "gemini"));
+    registerProvider("gemini", { executable: join(bin, "agy") }, stateDir);
+    updateProvider("gemini", { executable: join(bin, "gemini") }, stateDir);
+    expect(inspectProvider("gemini", stateDir)).toMatchObject({
+      adapter: "gemini",
+      executable: realpathSync(join(bin, "gemini")),
+    });
+  });
+
+  it("repairs a discovered Gemini adapter when the executable family changes", () => {
+    const root = mkdtempSync(join(tmpdir(), "rooms-providers-"));
+    const stateDir = join(root, "state");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    setupMachineIdentity(stateDir);
+    executable(join(bin, "agy"));
+    discoverProviders(stateDir, { PATH: bin });
+    unlinkSync(join(bin, "agy"));
+    executable(join(bin, "gemini"));
+
+    expect(discoverProviders(stateDir, { PATH: bin }).providers).toEqual([
+      expect.objectContaining({ name: "gemini", adapter: "gemini", executable: realpathSync(join(bin, "gemini")) }),
+    ]);
+  });
 });
 
 function executable(path: string): void {

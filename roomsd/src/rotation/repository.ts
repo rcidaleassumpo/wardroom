@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { RotationAudit, RotationRole, RotationRuntime, RotationStore } from "./contracts.js";
 

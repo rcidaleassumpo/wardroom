@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { arch, platform } from "node:process";
 import { join, relative, resolve } from "node:path";
 import { assertAbsolutePath, assertSafeVersion, isPresent, roomsPaths, type RoomsPaths } from "./paths.js";
@@ -30,9 +31,6 @@ export type ReleaseManifest = Readonly<{
   minimumMacOS: string;
   protocolVersion: number;
   storeSchemaVersion: number;
-  features?: Readonly<{
-    federation: boolean;
-  }>;
   signing: Readonly<{
     mode: ReleaseSigningMode;
     identity: string | null;
@@ -51,6 +49,8 @@ export type ReleaseManifest = Readonly<{
 
 export type VerifiedRelease = Readonly<{ directory: string; manifest: ReleaseManifest }>;
 export type InstalledReleaseContract = Readonly<{ version: string; storeSchemaVersion: number }>;
+export type ReleasePruneResult = Readonly<{ removed: readonly string[]; retained: readonly string[]; skipped: readonly string[] }>;
+export type ReleasePruneCandidate = Readonly<{ name: string; manifest: ReleaseManifest; modified: number }>;
 
 export function readReleaseManifest(directoryInput: string): ReleaseManifest {
   const directory = assertAbsolutePath(directoryInput, "release directory");
@@ -68,12 +68,6 @@ export function readReleaseManifest(directoryInput: string): ReleaseManifest {
   // against the live store in assertReleaseUpgradeCompatible below.
   if (!Number.isSafeInteger(manifest.protocolVersion) || Number(manifest.protocolVersion) < 1) throw new Error("Rooms release protocol version is invalid");
   if (!Number.isSafeInteger(manifest.storeSchemaVersion) || Number(manifest.storeSchemaVersion) < 1) throw new Error("Rooms release store schema version is invalid");
-  if (manifest.features !== undefined && (
-    !manifest.features ||
-    typeof manifest.features !== "object" ||
-    typeof manifest.features.federation !== "boolean" ||
-    Object.keys(manifest.features).some(name => name !== "federation")
-  )) throw new Error("Rooms release feature metadata is invalid");
   if (!manifest.signing || !["LOCAL_PROOF_ONLY", "DEVELOPER_ID_NOTARIZED"].includes(manifest.signing.mode)) throw new Error("Rooms release signing mode is invalid");
   if (manifest.signing.notarized !== (manifest.signing.mode === "DEVELOPER_ID_NOTARIZED")) throw new Error("Rooms release notarization claim does not match signing mode");
   if (!manifest.files || typeof manifest.files !== "object") throw new Error("Rooms release file checksums are missing");
@@ -142,6 +136,13 @@ export function assertReleaseIdentityUnchanged(installed: ReleaseManifest, incom
       ? "At least one of these releases is ad-hoc signed, which gives every build its own identity: rebuild with ROOMS_SIGNING_IDENTITY set to a code-signing certificate."
       : "If this is a deliberate signing-certificate change, install it with --allow-identity-change and re-grant App Management once."),
   );
+}
+
+export function hasSameReleaseIdentity(left: ReleaseManifest, right: ReleaseManifest): boolean {
+  const before = left.signing.designatedRequirements;
+  const after = right.signing.designatedRequirements;
+  return left.signing.stableIdentity === true && right.signing.stableIdentity === true &&
+    before !== undefined && after !== undefined && RELEASE_FILES.every(name => before[name] === after[name]);
 }
 
 export function verifyRelease(directoryInput: string, options: { allowQuarantine?: boolean } = {}): VerifiedRelease {
@@ -222,6 +223,68 @@ export function verifyCurrentRelease(options: { stateDir?: string; installRoot?:
   const paths = roomsPaths(options.stateDir, options.installRoot);
   if (!isSymlinkToDirectory(paths.currentLink)) throw new Error(`Rooms current release is not an installed symlink: ${paths.currentLink}`);
   return verifyRelease(realpathSync(paths.currentLink));
+}
+
+/**
+ * Keep the current release and one verified rollback release with the same
+ * stable macOS code identity. Invalid entries and symlinks are never removed.
+ * A legacy or ad-hoc current release disables pruning because it cannot prove
+ * that its rollback candidate represents the same program to macOS.
+ */
+export function pruneOldReleases(options: { stateDir?: string; installRoot?: string } = {}): ReleasePruneResult {
+  const paths = roomsPaths(options.stateDir, options.installRoot);
+  const current = verifyCurrentRelease(paths);
+  const retained = [current.manifest.version];
+  const removed: string[] = [];
+  const skipped: string[] = [];
+  if (current.manifest.signing.stableIdentity !== true || !current.manifest.signing.designatedRequirements) {
+    return { removed, retained, skipped: existingReleaseNames(paths).filter(name => name !== current.manifest.version) };
+  }
+
+  const root = realpathSync(paths.releaseRoot);
+  const candidates: Array<ReleasePruneCandidate & { directory: string }> = [];
+  for (const name of existingReleaseNames(paths)) {
+    if (name === current.manifest.version) continue;
+    const directory = join(root, name);
+    try {
+      const metadata = lstatSync(directory);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(directory) !== directory) throw new Error("unsafe release entry");
+      const release = verifyRelease(directory);
+      candidates.push({ name, directory, manifest: release.manifest, modified: metadata.mtimeMs });
+    } catch {
+      skipped.push(name);
+    }
+  }
+  const plan = planReleasePruning(current.manifest, candidates);
+  retained.push(...plan.retained);
+  for (const candidate of candidates.filter(item => plan.removed.includes(item.name))) {
+    try {
+      const metadata = lstatSync(candidate.directory);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(candidate.directory) !== candidate.directory) throw new Error("release entry changed during pruning");
+      rmSync(candidate.directory, { recursive: true });
+      removed.push(candidate.name);
+    } catch {
+      skipped.push(candidate.name);
+    }
+  }
+  return { removed, retained, skipped };
+}
+
+export function planReleasePruning(current: ReleaseManifest, candidates: readonly ReleasePruneCandidate[]): Readonly<{ retained: readonly string[]; removed: readonly string[] }> {
+  if (current.signing.stableIdentity !== true || !current.signing.designatedRequirements) {
+    return { retained: candidates.map(candidate => candidate.name), removed: [] };
+  }
+  const ordered = [...candidates].sort((left, right) => right.modified - left.modified || right.name.localeCompare(left.name));
+  const rollback = ordered.find(candidate => hasSameReleaseIdentity(current, candidate.manifest));
+  return {
+    retained: rollback ? [rollback.name] : [],
+    removed: ordered.filter(candidate => candidate !== rollback).map(candidate => candidate.name),
+  };
+}
+
+function existingReleaseNames(paths: RoomsPaths): string[] {
+  if (!existsSync(paths.releaseRoot)) return [];
+  return readdirSync(paths.releaseRoot).filter(name => !name.startsWith(".") && (() => { try { assertSafeVersion(name); return true; } catch { return false; } })());
 }
 
 /** Read only the installed release values needed to diagnose an older daemon. */

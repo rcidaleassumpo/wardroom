@@ -1,5 +1,5 @@
 name: Protocol design proposal
-description: Propose a versioned change to Wardroom's public `rooms` protocol.
+description: Propose a versioned change to the public Rooms protocol.
 title: "[Protocol] "
 labels: ["enhancement"]
 body:

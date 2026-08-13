@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -259,7 +260,8 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       const actor = runtimeActor(repository, input.credential);
       if (actor.role !== "operator") throw new Error("channel archive requires an operator credential");
       const channel = repository.currentChannel(input.channel);
-      if (channel?.ownerOperatorSessionId && channel.ownerOperatorSessionId !== actor.sessionId) throw new Error("channel archive requires the owning operator credential");
+      const activeOperatorMember = repository.isActiveMember(input.channel, actor.sessionId, "operator");
+      if (channel?.ownerOperatorSessionId && channel.ownerOperatorSessionId !== actor.sessionId && !activeOperatorMember) throw new Error("channel archive requires the owning or active channel operator credential");
       return archiveChannelLifecycle(repository, { channelId: input.channel, force: input.force }, {
         terminateRuntime: (runtime) => daemonRuntime.callAs(actor.sessionId, "runtimeTerminate", { runtimeId: runtime.runtimeId, generation: runtime.generation }),
         closeChannel: () => daemonRuntime.callAs(actor.sessionId, "closeChannel", { channelId: input.channel }),
@@ -321,7 +323,11 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
     },
 
     async inspectSession(sessionId: string) {
-      return repository.inspectSession(sessionId);
+      // Runtime configuration belongs to the authority that hosts the
+      // generation. Ask roomsd over its authenticated connection so a remote
+      // or relaunched runtime reports its own persisted cwd; never infer it
+      // from this CLI process or local provider files.
+      return daemonRuntime.call("inspectSession", { sessionId });
     },
 
     async listSessions(input: SessionListInput) {

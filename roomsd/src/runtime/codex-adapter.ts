@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import type { AllowlistedLaunchConfig, LayoutMetadata } from "../blueprints/resumable.js";
 import type { ProviderConversationPort, RuntimeGenerationPort, TeardownFence } from "../lifecycle/suspend-resume.js";
@@ -122,7 +123,7 @@ export class CodexRuntimeAdapter implements RuntimeGenerationPort {
   constructor(private readonly spawnCodex: SpawnCodex = (executable, args, cwd) => ({ process: spawn(executable, [...args], { cwd, stdio: "ignore" }), runtimeId: `runtime-${Date.now()}-${Math.random().toString(16).slice(2)}` }), private readonly allowlist: LaunchAllowlist = defaultLaunchAllowlist, private readonly verifyFence: TeardownFenceVerifier = () => false, private readonly ownership: RuntimeOwnershipStore = new MemoryRuntimeOwnershipStore()) {}
 
   async launch(input: { channelId: string; priorSessionId: string; generation: number; launch: AllowlistedLaunchConfig; layout: LayoutMetadata; adapterKind: string }): Promise<{ sessionId: string; runtimeId: string }> {
-    if (!["codex", "claude", "grok", "agy"].includes(input.adapterKind)) throw new Error(`unsupported runtime adapter ${input.adapterKind}`);
+    if (!["codex", "claude", "grok", "agy", "gemini"].includes(input.adapterKind)) throw new Error(`unsupported runtime adapter ${input.adapterKind}`);
     if (!this.allowlist(input.launch)) throw new Error("launch configuration is not allowlisted");
     const existing = this.processes.get(input.priorSessionId);
     if (existing && existing.generation >= input.generation) throw new Error("runtime generation is already active");

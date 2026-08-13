@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /**
  * TypeScript service surface for Rooms.
  *
@@ -71,7 +72,7 @@ export interface ResumeRequest { context?: RequestContext; channelName: string; 
 
 export type RuntimeState = "creating" | "running" | "recovering" | "crashed" | "exited" | "terminating" | "terminated";
 export type RuntimeAttachmentMode = "observe" | "controller";
-export interface RuntimeRecord { runtimeId: string; homeAuthorityId: string; sessionId: string; generation: number; protocolVersion: number; transportKind: string; state: RuntimeState; machineId: string; createdAt: string; updatedAt: string; endedAt?: string | null; exitReason?: string | null }
+export interface RuntimeRecord { runtimeId: string; homeAuthorityId: string; sessionId: string; providerThreadId?: string | null; cwd?: string | null; cwdState?: "available" | "unavailable"; cwdReason?: string | null; generation: number; protocolVersion: number; transportKind: string; state: RuntimeState; machineId: string; createdAt: string; updatedAt: string; endedAt?: string | null; exitReason?: string | null }
 export interface RuntimeBindingRecord { bindingId: string; runtimeId: string; sessionId: string; generation: number; channelId?: string | null; adapterKind: string; handleRef: string; boundAt: string; unboundAt?: string | null }
 export interface RuntimeAttachmentRecord { attachmentId: string; runtimeId: string; sessionId: string; generation: number; viewerId: string; mode: RuntimeAttachmentMode; outputCursor: string; leaseExpiresAt?: string | null; attachedAt: string; detachedAt?: string | null }
 export interface RuntimeEventRecord { runtimeId: string; generation: number; eventSeq: number; eventId: string; kind: string; outputCursor?: string | null; messageId?: string | null; outcome?: string | null; payload: Record<string, string | number | boolean | null>; occurredAt: string }
@@ -91,6 +92,95 @@ export interface RuntimeResponse { runtime?: RuntimeRecord; binding?: RuntimeBin
 export interface RuntimeListResponse { runtimes: RuntimeRecord[] }
 export interface RuntimeEventsResponse { events: RuntimeEventRecord[] }
 export interface RuntimeOperationResponse { ok: boolean; outcome?: string; bytesWritten?: number; attachment?: RuntimeAttachmentRecord; runtime?: RuntimeRecord; cursor?: string }
+
+export type LocalProviderName = "codex" | "claude" | "grok" | "gemini";
+export type LocalProviderAdapter = "codex" | "claude" | "grok" | "agy" | "gemini";
+export interface LocalProviderHealth { status: "available" | "missing" | "disabled"; checkedAt: string; message?: string }
+export interface LocalProviderRegistration {
+  name: LocalProviderName;
+  enabled: boolean;
+  executable: string;
+  adapter: LocalProviderAdapter;
+  defaults: Record<string, string | boolean>;
+  health: LocalProviderHealth;
+  discoveredAt: string;
+  updatedAt: string;
+  launchOptions: Record<string, unknown>;
+  modelCatalog?: ProviderModelCatalog | null;
+}
+export interface ProviderModelCatalogEntry { id: string; label: string; aliases: string[]; reasoningLevels: string[]; availability: "available" | "unavailable"; deprecated: boolean }
+export interface ProviderModelCatalog { version: string; provider: "codex" | "claude"; sourceUrl: string; verifiedAt: string; state: "fresh" | "stale"; models: ProviderModelCatalogEntry[] }
+export interface LocalProviderRegistryResponse { providers: LocalProviderRegistration[] }
+export interface ListProvidersRequest { context?: RequestContext }
+export interface LocalProviderWriteRequest {
+  context?: RequestContext;
+  mode: "register" | "update";
+  name: LocalProviderName;
+  executable?: string;
+  adapter?: LocalProviderAdapter;
+  enabled?: boolean;
+  defaults?: Record<string, string | boolean>;
+}
+export interface LocalProviderRemoveRequest { context?: RequestContext; name: LocalProviderName }
+export interface LocalProviderMutationResponse { providers: LocalProviderRegistration[] }
+
+export interface RegisterChannelSessionRequest {
+  context?: RequestContext;
+  channelId: string;
+  sessionId: string;
+  role: SessionRole;
+  externalId?: string | null;
+  deliveryMode?: "runtime" | "log";
+}
+export interface RegisterChannelSessionResponse { session?: Session; membership?: Membership; idempotent: boolean }
+export interface LaunchSessionRequest {
+  context?: RequestContext;
+  channelId: string;
+  sessionId: string;
+  provider: LocalProviderName;
+  role: Exclude<SessionRole, "operator">;
+  prompt: string;
+  cwd: string;
+  launchOptions?: Record<string, unknown>;
+  providerArguments?: string[];
+  promptTimeoutMs?: number;
+}
+export interface LaunchSessionResponse {
+  session?: Session;
+  runtime?: RuntimeResponse;
+  promptDelivered: boolean;
+  promptAccepted: boolean;
+  promptDeliveryAttempts: number;
+  providerReady?: { settled: boolean; byteCount: number; cursor: string } | null;
+}
+export interface InspectSessionRequest { context?: RequestContext; sessionId: string }
+export interface InspectSessionResponse { session?: Session; memberships: MembershipHistory[]; runtime?: Record<string, unknown> | null }
+export interface EndManagedSessionRequest { context?: RequestContext; sessionId: string }
+export interface LocalSendMessageRequest { context?: RequestContext; channelId: string; targetSessionId?: string | null; body: string; replyToEventId?: string }
+export interface ResolveSessionRuntimeRequest { context?: RequestContext; sessionId: string; mode: RuntimeAttachmentMode; outputCursor?: string }
+export interface ResolveSessionRuntimeResponse { runtimeId: string; homeAuthorityId: string; sessionId: string; generation: number; viewerId: string; mode: RuntimeAttachmentMode; outputCursor?: string }
+export interface LocalChannelLifecycleRequest { context?: RequestContext; channelId: string }
+export interface LocalChannelArchiveRequest extends LocalChannelLifecycleRequest { force: boolean }
+export interface LocalChannelArchiveResponse {
+  channelId: string;
+  completed: boolean;
+  policy: { requiresForce: boolean; activeMemberships: number; activeRuntimes: number };
+  steps: Record<string, unknown>[];
+  error?: { code: string; message: string };
+}
+export interface LocalChannelResumeOutcome { priorSessionId: string; sessionId: string | null; runtimeId: string | null; generation: number; outcome: "resumed" | "failed" | "rolledBack"; error?: string }
+export interface ChannelStateSnapshotsRequest { context?: RequestContext; channelIds: string[] }
+export interface ChannelControlPagesRequest { context?: RequestContext; channels: { channelId: string; afterCursor?: string }[]; sessionId: string; limit?: number }
+export interface UsageSeriesRequest { context?: RequestContext; scope: "session" | "channel"; id: string; window: string; collect: boolean }
+export interface RotationSessionRequest { context?: RequestContext; channelId: string; sessionId: string }
+export interface RotationAcknowledgeRequest { context?: RequestContext; rotationId: string; nonce: string }
+export interface RotationCommitRequest { context?: RequestContext; rotationId: string }
+export interface RotationCancelRequest { context?: RequestContext; rotationId: string; reason: string }
+export interface RuntimeQuotaGetRequest { context?: RequestContext; machineId?: string }
+export interface RuntimeQuotaSetRequest { context?: RequestContext; machineId: string; limit: number }
+export interface RuntimeQuotaResetRequest { context?: RequestContext; machineId: string }
+export interface RuntimeQuotaListResponse { quotas: unknown[] }
+export interface RuntimeQuotaMutationResponse { quota: unknown }
 
 export interface LifecycleStatus { state: LifecycleState; detail?: string; cursor?: string; observedAt?: Timestamp }
 export type WatchEvent = { snapshot: Snapshot } | { delta: Change } | { status: LifecycleStatus };
@@ -130,8 +220,13 @@ export const ROOMS_PROTO_METHODS = [
 ] as const;
 
 export const ROOMS_LOCAL_EXTENSION_METHODS = [
-  "updateSessionRole", "commitControl", "getControls", "runtimeCreate", "runtimeList", "runtimeStatus", "runtimeAttach", "runtimeDetach",
+  "updateSessionRole", "commitControl", "getControls", "channelStateSnapshots", "channelControlPages", "usageSeries",
+  "registerChannelSession", "launchSession", "inspectSession", "endManagedSession", "sendMessage", "suspendChannel", "resumeChannel", "archiveChannel",
+  "listProviders", "writeProvider", "removeProvider", "resolveSessionRuntime",
+  "rotationInspect", "rotationPrepare", "rotationAcknowledge", "rotationCommit", "rotationCancel",
+  "runtimeCreate", "runtimeList", "runtimeStatus", "runtimeAttach", "runtimeAttachStream", "runtimeDetach",
   "runtimeInput", "runtimeResize", "runtimeSignal", "runtimeTerminate", "runtimeRecover", "runtimeDeliverMessage", "runtimeEvents",
+  "runtimeQuotaGet", "runtimeQuotaSet", "runtimeQuotaReset",
 ] as const;
 
 /** Public protobuf service shape. */
@@ -171,10 +266,31 @@ export interface RoomsLocalServiceExtensions {
   updateSessionRole(request: UpdateSessionRoleRequest): Promise<UpdateSessionRoleResponse>;
   commitControl(request: CommitControlRequest): Promise<ControlResponse>;
   getControls(request: GetControlsRequest): Promise<ControlsResponse>;
+  channelStateSnapshots(request: ChannelStateSnapshotsRequest): Promise<unknown>;
+  channelControlPages(request: ChannelControlPagesRequest): Promise<unknown>;
+  usageSeries(request: UsageSeriesRequest): Promise<unknown>;
+  registerChannelSession(request: RegisterChannelSessionRequest): Promise<RegisterChannelSessionResponse>;
+  launchSession(request: LaunchSessionRequest): Promise<LaunchSessionResponse>;
+  inspectSession(request: InspectSessionRequest): Promise<InspectSessionResponse>;
+  endManagedSession(request: EndManagedSessionRequest): Promise<void>;
+  sendMessage(request: LocalSendMessageRequest): Promise<MessageResponse>;
+  suspendChannel(request: LocalChannelLifecycleRequest): Promise<unknown>;
+  resumeChannel(request: LocalChannelLifecycleRequest): Promise<LocalChannelResumeOutcome[]>;
+  archiveChannel(request: LocalChannelArchiveRequest): Promise<LocalChannelArchiveResponse>;
+  listProviders(request: ListProvidersRequest): Promise<LocalProviderRegistryResponse>;
+  writeProvider(request: LocalProviderWriteRequest): Promise<LocalProviderMutationResponse>;
+  removeProvider(request: LocalProviderRemoveRequest): Promise<LocalProviderMutationResponse>;
+  resolveSessionRuntime(request: ResolveSessionRuntimeRequest): Promise<ResolveSessionRuntimeResponse>;
+  rotationInspect(request: RotationSessionRequest): Promise<unknown>;
+  rotationPrepare(request: RotationSessionRequest): Promise<unknown>;
+  rotationAcknowledge(request: RotationAcknowledgeRequest): Promise<unknown>;
+  rotationCommit(request: RotationCommitRequest): Promise<unknown>;
+  rotationCancel(request: RotationCancelRequest): Promise<unknown>;
   runtimeCreate(request: RuntimeCreateRequest): Promise<RuntimeResponse>;
   runtimeList(request: RuntimeListRequest): Promise<RuntimeListResponse>;
   runtimeStatus(request: RuntimeStatusRequest): Promise<RuntimeResponse>;
   runtimeAttach(request: RuntimeAttachRequest): Promise<RuntimeResponse>;
+  runtimeAttachStream(request: RuntimeAttachRequest): AsyncIterable<unknown>;
   runtimeDetach(request: RuntimeDetachRequest): Promise<RuntimeOperationResponse>;
   runtimeInput(request: RuntimeInputRequest): Promise<RuntimeOperationResponse>;
   runtimeResize(request: RuntimeResizeRequest): Promise<RuntimeOperationResponse>;
@@ -183,6 +299,9 @@ export interface RoomsLocalServiceExtensions {
   runtimeRecover(request: RuntimeRecoverRequest): Promise<RuntimeResponse>;
   runtimeDeliverMessage(request: RuntimeDeliverMessageRequest): Promise<RuntimeOperationResponse>;
   runtimeEvents(request: RuntimeEventsRequest): Promise<RuntimeEventsResponse>;
+  runtimeQuotaGet(request: RuntimeQuotaGetRequest): Promise<RuntimeQuotaListResponse>;
+  runtimeQuotaSet(request: RuntimeQuotaSetRequest): Promise<RuntimeQuotaMutationResponse>;
+  runtimeQuotaReset(request: RuntimeQuotaResetRequest): Promise<RuntimeQuotaMutationResponse>;
 }
 
 /** Complete implementation shape consumed by the local Rooms daemon. */

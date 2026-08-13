@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 const FEDERATED_SESSION = /^federation:authority-[^:]+:(.+)$/;
 
 /** The stable agent-facing identity; transport routing prefixes stay internal. */

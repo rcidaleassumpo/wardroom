@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RoomsError, RoomsErrorCode } from "../generated/rooms/v1/rooms.js";
 
 const exactCodes = new Map<string, RoomsErrorCode>([

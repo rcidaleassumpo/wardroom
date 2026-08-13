@@ -1,12 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
 import { constants, accessSync, chmodSync, closeSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { readMachineIdentityStatus, resolveRoomsStateDir } from "../identity/machine-identity.js";
 
 export const ROOM_PROVIDERS = ["codex", "claude", "grok", "gemini"] as const;
 export type RoomsProvider = typeof ROOM_PROVIDERS[number];
-export const PROVIDER_ADAPTERS = ["codex", "claude", "grok", "agy"] as const;
+export const PROVIDER_ADAPTERS = ["codex", "claude", "grok", "agy", "gemini"] as const;
 export type ProviderAdapter = typeof PROVIDER_ADAPTERS[number];
 export type ProviderDefaults = Readonly<Record<string, string | boolean>>;
 export type ProviderHealth = Readonly<{ status: "available" | "missing" | "disabled"; checkedAt: string; message?: string }>;
@@ -46,7 +47,10 @@ export function discoverProviders(stateDirInput?: string, environment: NodeJS.Pr
     const previous = existing?.providers.find((item) => item.name === name);
     const executable = discoverProviderExecutable(name, environment) ?? validExistingExecutable(previous?.executable, name);
     if (!executable) return previous ? [{ ...previous, health: health(previous.enabled, previous.executable, now) }] : [];
-    return [{ name, enabled: previous?.enabled ?? true, executable, adapter: previous?.adapter ?? CATALOG[name].adapter, defaults: previous?.defaults ?? {}, health: health(previous?.enabled ?? true, executable, now), discoveredAt: previous?.discoveredAt ?? now, updatedAt: now }];
+    const adapter = previous?.executable === executable
+      ? previous.adapter
+      : inferredAdapter(name, executable);
+    return [{ name, enabled: previous?.enabled ?? true, executable, adapter, defaults: previous?.defaults ?? {}, health: health(previous?.enabled ?? true, executable, now), discoveredAt: previous?.discoveredAt ?? now, updatedAt: now }];
   });
   return writeRegistry(stateDir, providers, existing?.authorityId);
 }
@@ -70,7 +74,7 @@ export function registerProvider(name: RoomsProvider, input: string | ProviderRe
   if (existing?.providers.some((item) => item.name === name)) throw new Error(`Rooms provider ${name} is already registered; use provider update`);
   const now = new Date().toISOString();
   const enabled = options.enabled ?? true;
-  const item: ProviderRegistration = { name, enabled, executable, adapter: providerAdapter(options.adapter ?? CATALOG[name].adapter), defaults: validateDefaults(options.defaults ?? {}), health: health(enabled, executable, now), discoveredAt: now, updatedAt: now };
+  const item: ProviderRegistration = { name, enabled, executable, adapter: providerAdapter(options.adapter ?? inferredAdapter(name, executable)), defaults: validateDefaults(options.defaults ?? {}), health: health(enabled, executable, now), discoveredAt: now, updatedAt: now };
   return writeRegistry(stateDir, [...(existing?.providers ?? []), item].sort(byName), existing?.authorityId);
 }
 
@@ -82,7 +86,12 @@ export function updateProvider(name: RoomsProvider, input: ProviderRegistrationI
   const now = new Date().toISOString();
   const executable = input.executable ? validateExecutable(input.executable, name) : current.executable;
   const enabled = input.enabled ?? current.enabled;
-  const updated: ProviderRegistration = { ...current, enabled, executable, adapter: input.adapter ? providerAdapter(input.adapter) : current.adapter, defaults: input.defaults === undefined ? current.defaults : validateDefaults(input.defaults), health: health(enabled, executable, now), updatedAt: now };
+  const adapter = input.adapter
+    ? providerAdapter(input.adapter)
+    : input.executable
+      ? inferredAdapter(name, executable)
+      : current.adapter;
+  const updated: ProviderRegistration = { ...current, enabled, executable, adapter, defaults: input.defaults === undefined ? current.defaults : validateDefaults(input.defaults), health: health(enabled, executable, now), updatedAt: now };
   return writeRegistry(stateDir, existing!.providers.map((item) => item.name === name ? updated : item), existing!.authorityId);
 }
 
@@ -118,6 +127,11 @@ export function providerName(value: string): RoomsProvider {
 export function providerAdapter(value: string): ProviderAdapter {
   if (!(PROVIDER_ADAPTERS as readonly string[]).includes(value)) throw new Error(`Rooms supports provider adapters: ${PROVIDER_ADAPTERS.join(", ")}`);
   return value as ProviderAdapter;
+}
+
+function inferredAdapter(name: RoomsProvider, executable: string): ProviderAdapter {
+  if (name !== "gemini") return CATALOG[name].adapter;
+  return executable.includes("@google/gemini-cli") || basename(executable).startsWith("gemini") ? "gemini" : "agy";
 }
 
 export function discoverProviderExecutable(name: RoomsProvider, environment: NodeJS.ProcessEnv = process.env): string | undefined {

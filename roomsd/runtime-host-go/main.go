@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Rooms production per-session runtime host (Go).
 //
 // This source is intentionally maintained in the production packaging tree;

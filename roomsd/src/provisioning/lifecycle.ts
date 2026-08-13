@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installService, runRoomsService, serviceStatus } from "./launchd.js";
-import { installRelease, releasePaths, switchToRelease, verifyCurrentRelease, verifyRelease } from "./release.js";
+import { installRelease, pruneOldReleases, releasePaths, switchToRelease, verifyCurrentRelease, verifyRelease } from "./release.js";
 import { assertSafeVersion, type RoomsPaths } from "./paths.js";
 
 export function runRoomsInstall(releaseDirectory: string, options: { stateDir?: string; installRoot?: string; allowIdentityChange?: boolean } = {}): unknown {
@@ -13,14 +14,16 @@ export function runRoomsUpgrade(releaseDirectory: string, options: { stateDir?: 
   const paths = releasePaths(options);
   const prior = safeCurrent(paths);
   const drained = runRoomsDrain(options);
+  let installed;
   try {
-    const installed = installRelease(releaseDirectory, options);
+    installed = installRelease(releaseDirectory, options);
     if (existsSync(paths.launchAgentPlist)) installService(paths);
-    return { upgraded: true, from: prior?.manifest.version ?? null, to: installed.manifest.version, drain: drained };
   } catch (error) {
     if (prior && existsSync(paths.launchAgentPlist)) { switchToRelease(prior.manifest.version, options); installService(paths); }
     throw error;
   }
+  const prune = pruneOldReleases(options);
+  return { upgraded: true, from: prior?.manifest.version ?? null, to: installed.manifest.version, drain: drained, prune };
 }
 
 export function runRoomsRollback(versionInput: string | undefined, options: { stateDir?: string; installRoot?: string } = {}): unknown {

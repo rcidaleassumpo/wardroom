@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
@@ -289,7 +290,33 @@ const steps: readonly MigrationStep[] = [{ version: 1, apply: (db) => db.exec(`C
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS message_threads_channel_state ON message_threads(channel_id, state);
-`) }];
+`) },
+  { version: 22, apply: (db) => db.exec(`
+  CREATE TABLE IF NOT EXISTS provider_reply_jobs (
+    source_event_id TEXT PRIMARY KEY,
+    source_cursor INTEGER NOT NULL,
+    source_body TEXT NOT NULL,
+    channel_id TEXT NOT NULL REFERENCES channels(id),
+    source_sender_session_id TEXT NOT NULL REFERENCES sessions(id),
+    provider_session_id TEXT NOT NULL REFERENCES sessions(id),
+    runtime_id TEXT NOT NULL REFERENCES runtimes(runtime_id),
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    adapter_kind TEXT NOT NULL,
+    provider_thread_id TEXT,
+    scan_state_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','published','skipped','failed')),
+    reply_event_id TEXT,
+    outcome_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS provider_reply_jobs_pending
+    ON provider_reply_jobs(state, created_at)
+    WHERE state='pending';
+`) },
+  { version: 23, apply: (db) => {
+      if (columnMissing(db, "runtimes", "effective_cwd")) db.exec(`ALTER TABLE runtimes ADD COLUMN effective_cwd TEXT;`);
+     } }];
 function columnMissing(db: DatabaseSync, table: string, column: string): boolean {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return false;
   return !db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name=?`).get(column);

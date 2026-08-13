@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export type RotationRole = "operator" | "planner" | "worker" | "reviewer";
 export type ProviderTurnPhase = "idle" | "thinking" | "streaming" | "tool" | "busy" | "ready" | "unsupported" | null;
 

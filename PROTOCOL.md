@@ -1,4 +1,4 @@
-# Wardroom protocol v4
+# Rooms protocol v4
 
 Status: implementation-derived specification for the protocol declared by
 `roomsd/release-contract.json` at protocol version 4.
@@ -11,9 +11,9 @@ separate version spaces.
 
 ## 1. Scope and ownership
 
-Wardroom owns channels, sessions, memberships, messages, recipients, credentials,
+Rooms owns channels, sessions, memberships, messages, recipients, credentials,
 runtime bindings, lifecycle, and federation routes. Provider adapters translate
-Wardroom records to provider processes and transports. They do not replace Wardroom
+Rooms records to provider processes and transports. They do not replace Rooms
 identity, storage, authority, or delivery records.
 
 The checked-in protobuf contains 28 RPCs. Local Unix requests, generated
@@ -29,8 +29,8 @@ every implementation method is available on every listener.
 
 The current release contract uses these version spaces:
 
-- Release protocol `4` is the current Wardroom release contract.
-- Store schema `21` is an internal SQLite version, not a network protocol.
+- Release protocol `4` is the current Rooms release contract.
+- Store schema `22` is an internal SQLite version, not a network protocol.
 - Protobuf package `rooms.v1` and generated marker `1` name API types.
 - Runtime-host protocol `1` covers local host enrollment and frames.
 - Federation protocol `1` covers peer enrollment and command envelopes.
@@ -58,12 +58,12 @@ not a claim that current transports negotiate new fields or enum values.
 
 Channel, session, runtime, generation, machine authority, event, and credential
 IDs are distinct. Clients must treat them as opaque. A provider thread ID is
-metadata on a Wardroom session; it is not a Wardroom session ID.
+metadata on a Rooms session; it is not a Rooms session ID.
 
-Credentials are opaque bearer tokens issued for a Wardroom session. The credential
+Credentials are opaque bearer tokens issued for a Rooms session. The credential
 store persists a SHA-256 hash, not the token. Authentication fails for a blank,
 unknown, malformed, or revoked credential, and when the actor session is ended
-or has no role. Authentication resolves the actor session and role from Wardroom.
+or has no role. Authentication resolves the actor session and role from Rooms.
 Caller-supplied sender, role, registrar, or `authorized_by_session_id` fields do
 not override that identity.
 
@@ -80,7 +80,7 @@ protobuf keeps role as a string, but the current service applies these rules:
 - a channel allows at most one active planner and one active reviewer.
 
 Private local composition may derive an actor from trusted process context
-instead of a token. It must still use the same Wardroom identity and domain rules.
+instead of a token. It must still use the same Rooms identity and domain rules.
 
 ## 4. Records, cursors, and replay
 
@@ -126,7 +126,7 @@ in the order stated by the implementation. Clients must not use those methods
 as unbounded event feeds.
 
 `Watch` has a fail-closed slow-consumer bound of 128 pending deltas. If the
-consumer does not drain before another delta crosses that bound, Wardroom closes
+consumer does not drain before another delta crosses that bound, Rooms closes
 the stream with a backpressure error. Reconnect with the last delivered cursor;
 do not assume the stream kept later deltas after it closed.
 
@@ -183,7 +183,7 @@ same resume idempotency key only for a retry of the same attempt.
 
 Targets are `here`, `direct`, an explicit session set, or a legacy unknown
 shape. A channel broadcast resolves current eligible recipients. A direct
-message may be channel-less and globally addressed to a Wardroom session. The
+message may be channel-less and globally addressed to a Rooms session. The
 target remains routing metadata; a visible sender prefix does not name the
 recipient.
 
@@ -200,9 +200,9 @@ but derive the thread only from canonical parent fields. Store schema 18
 backfills legacy correlation links in cursor order. It stops on a missing,
 cross-channel, or out-of-order parent instead of assigning a guessed thread.
 
-Store schema 19 keeps canonical thread lifecycle state under the root Wardroom
+Store schema 19 keeps canonical thread lifecycle state under the root Rooms
 event ID. `GetThreadLifecycle`, `ResolveThread`, and `ReopenThread` expose that
-state. Wardroom rejects a reply to a resolved root until a caller reopens it.
+state. Rooms rejects a reply to a resolved root until a caller reopens it.
 These thread operations do not create, launch, suspend, or end a runtime.
 
 Correlation can also carry request ID, deduplication key, purpose, expected
@@ -212,7 +212,7 @@ with `was_deduplicated = true`; it does not append a second message.
 
 A local reply stores its parent in `correlation.replyToEventId`. The parent
 must exist in the same canonical channel, including the channel-less case.
-Wardroom rejects a missing or cross-channel parent as `staleReply`. The CLI exposes
+Rooms rejects a missing or cross-channel parent as `staleReply`. The CLI exposes
 this through `--reply-to`, `message show`, `message replies`, and the
 `--reply-to` filter on `message list`. It does not encode reply identity in the
 message body.
@@ -229,7 +229,7 @@ timeout, or automatic completion rule for them.
 ## 7. Delivery receipts
 
 A message event is the canonical stored message. Delivery fields describe the
-recipient acceptance known to Wardroom in the represented folded state:
+recipient acceptance known to Rooms in the represented folded state:
 
 - `delivered_recipient_session_ids` lists recipients whose current status is
   delivered;
@@ -240,7 +240,7 @@ recipient acceptance known to Wardroom in the represented folded state:
   delivery succeeds or fails.
 
 For a log-delivered participant, committing to the canonical log is delivery.
-For a runtime-delivered participant, Wardroom attempts the live runtime and records
+For a runtime-delivered participant, Rooms attempts the live runtime and records
 the outcome. A missing runtime can be queued when a route accepts later delivery
 or undeliverable when none exists. A direct send with no accepted recipient
 fails; a broadcast with no accepted recipient also fails.
@@ -255,9 +255,28 @@ Runtime-host delivery acknowledgements are `written`, `duplicate`, or
 `duplicate` means that delivery ID was already accepted there; `uncertain` is
 not success and is recorded as rejected/uncertain runtime delivery.
 
+Store schema 22 adds durable provider-reply jobs for one narrow local case: a
+log-delivered client sends a direct channel message to a provider runtime.
+Rooms records the provider transcript offsets before delivery and waits for the
+exact input plus a provider-native final marker. It then commits one canonical
+direct reply to the original sender with `reply_to_event_id` set to the source
+event. A stable deduplication key makes retries exact once. If the provider
+already sent a canonical Rooms reply, Rooms records a skipped job and does not
+copy the provider final again.
+
+If the provider does not record the delivered input within 30 seconds, Rooms
+ends the job as failed. It does not poll a dropped PTY submission forever.
+
+This rule does not apply to broadcasts, channel-less direct sends, managed
+launch prompts, or a sender whose delivery mode is `runtime`. It does not make
+PTY output canonical.
+Reasoning, tool calls, streaming commentary, and terminal bytes remain runtime
+data. Codex, Claude, Grok, Antigravity, and Google Gemini CLI adapters must
+identify final answers from their own structured transcripts.
+
 ## 8. Session bootstrap and provider paths
 
-Wardroom creates or attaches a durable session/runtime and injects a Wardroom-authored
+Rooms creates or attaches a durable session/runtime and injects a Rooms-authored
 briefing. The briefing supplies:
 
 - exact session ID, channel ID, assigned role, and launch roster;
@@ -266,7 +285,7 @@ briefing. The briefing supplies:
 - use `rooms whoami` only when identity is missing or conflicting;
 - refresh the roster only when needed;
 - direct/channel messaging rules, including locate-before-federated-send;
-- the rule that Wardroom owns channel, session, runtime, and delivery authority.
+- the rule that Rooms owns channel, session, runtime, and delivery authority.
 
 The briefing does not grant more authority than the canonical live session.
 Provider-native thread IDs remain adapter metadata and must be preserved when a
@@ -274,11 +293,11 @@ runtime resumes.
 
 Current support is capability-based rather than fixed in the proto:
 
-| Path | Wardroom contract |
+| Path | Rooms contract |
 | --- | --- |
 | Runtime | Durable runtime, generation, binding, attachment, replay cursor, and delivery acknowledgement. |
-| Provider driver | Starts or resumes a provider and maps provider process/thread state to the Wardroom runtime. |
-| MCP/tool call | Calls Wardroom commands when installed and authenticated; it is not another identity or delivery authority. |
+| Provider driver | Starts or resumes a provider and maps provider process/thread state to the Rooms runtime. |
+| MCP/tool call | Calls Rooms commands when installed and authenticated; it is not another identity or delivery authority. |
 
 The normative provider matrix is the tested source
 `roomsd/src/providers/capability-matrix.ts`. Publish that table; do not invent
@@ -289,10 +308,11 @@ support claims by hand.
 | `codex` | yes | yes | yes |
 | `claude` | yes | yes | yes |
 | `grok` | yes | yes | yes |
+| `gemini` | yes | yes | yes |
 
 Detail flags in the same module record resume limits. Codex and Claude support
-conversation and runtime-command resume. Grok supports launch, thread
-discovery, and the Wardroom skill, but not those resume adapters yet.
+conversation and runtime-command resume. Grok and Gemini support launch, thread
+discovery, and the Rooms skill, but not those resume adapters yet.
 
 ## 9. Runtime lifecycle
 
@@ -301,6 +321,12 @@ and local handlers expose create, list, status, attach, detach, input, resize,
 signal, terminate, recover, delivery, and runtime-event queries.
 
 A runtime belongs to a home authority and session and has a fenced generation.
+Each new generation stores the exact canonical working directory passed to its
+runtime host. Authenticated session inspection and runtime status return that
+directory with `cwdState=available`. A runtime created before schema 23 returns
+`cwd=null`, `cwdState=unavailable`, and
+`cwdReason=legacy-runtime-cwd-unavailable`; clients must not infer a replacement
+from provider transcripts, the inspecting process, or another machine.
 Attachments are observers or one controller. Controller-only operations require
 the controller lease. Output and events use replay cursors/sequences; a retained
 replay gap is reported instead of filled with invented output. Exit is terminal
@@ -329,7 +355,7 @@ federation separately requires admission by the channel's owning operator. Peer
 trust alone grants no channel access. The channel home stays canonical for
 membership, messages, cursors, and delivery decisions.
 
-Remote sessions use the exact authority-qualified target returned by Wardroom
+Remote sessions use the exact authority-qualified target returned by Rooms
 discovery, currently shaped like
 `federation:<authority-id>:<session-id>`. Treat it as opaque; do not construct,
 shorten, or infer it. Federated direct delivery is channel-less. Federated
@@ -366,11 +392,20 @@ receipt alone does not prove that a remote provider received and answered.
 The settled local extension boundary is:
 
 The checked-in protobuf remains the public 28-RPC contract. The TypeScript
-service surface names those methods in `RoomsProtoService` and keeps three
-control or role methods plus 12 runtime methods in
-`RoomsLocalServiceExtensions`. Contract tests pin both sets, the `GetEvents`
-request and response field tags, and the reply fields on `SendRequest` and
-`Message`.
+service surface names those methods in `RoomsProtoService`. It keeps 39 private
+local methods in `RoomsLocalServiceExtensions`. These methods cover role and
+control changes, bulk queries, channel and session lifecycle, and message
+delivery. They also cover provider access, rotation, runtime resolution,
+streaming, control, and quota.
+Contract tests pin both sets, the `GetEvents` request and response field tags,
+and the reply fields on `SendRequest` and `Message`.
+
+The local methods require an authenticated session on the same owner-only
+socket. Operator-only methods also derive the actor role and channel ownership
+from Rooms state; request ids and role fields never grant authority. The
+`runtimeAttachStream` extension is long-lived: it yields a hello with the
+attachment and replay cursors, then ordered output, exit, and error items.
+Closing that socket detaches the view without ending the runtime.
 
 The current contract status is:
 
@@ -379,7 +414,7 @@ The current contract status is:
 2. Closed: protobuf `Message.recipientStatuses` carries typed per-recipient
    delivery state. `RoomsErrorCode` supplies stable transport categories while
    `RoomsError.domain_code` preserves a more specific implementation code.
-3. Closed for the three public paths: `roomsd/src/providers/capability-matrix.ts`
+3. Closed for the four public paths: `roomsd/src/providers/capability-matrix.ts`
    is the tested matrix. Resume sub-capabilities still differ by provider.
 4. Protocol v4 has no replay-gap discovery RPC and no general message-size
    limit. Section 4 defines current query ordering, paging, retention, and Watch

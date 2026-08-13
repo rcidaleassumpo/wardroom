@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";

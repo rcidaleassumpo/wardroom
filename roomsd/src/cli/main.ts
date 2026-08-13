@@ -1,8 +1,8 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CommitMessageInput, ListMessagesInput, ListRepliesInput, RoomsCLIBackend, SendPromptInput, SessionCreateInput, SessionRegisterInput, ShowMessageInput } from "./backend.js";
 import { createDefaultRoomsCLIBackend } from "./default-backend.js";
@@ -76,8 +76,8 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   }
   if (scope === "machine" && command === "list") return formatResult((await requireFederationModule("rooms machine list")).listMachines(parsed.flags.get("state-dir")));
   if (scope === "machine" && command === "route" && name) return formatResult((await requireFederationModule("rooms machine route")).configureMachineRoute(name as AuthorityId, parsed.flags));
-  if (scope === "install") return formatResult(runRoomsInstall(parsed.flags.get("release-dir") ?? bundledReleaseDirectory(), { ...provisioningOptions(parsed.flags), allowIdentityChange: parsed.flags.get("allow-identity-change") === "true" }));
-  if (scope === "upgrade") return formatResult(runRoomsUpgrade(parsed.flags.get("release-dir") ?? bundledReleaseDirectory(), { ...provisioningOptions(parsed.flags), allowIdentityChange: parsed.flags.get("allow-identity-change") === "true" }));
+  if (scope === "install") return formatResult(runRoomsInstall(required(parsed.flags, "release-dir"), { ...provisioningOptions(parsed.flags), allowIdentityChange: parsed.flags.get("allow-identity-change") === "true" }));
+  if (scope === "upgrade") return formatResult(runRoomsUpgrade(required(parsed.flags, "release-dir"), { ...provisioningOptions(parsed.flags), allowIdentityChange: parsed.flags.get("allow-identity-change") === "true" }));
   if (scope === "rollback") return formatResult(runRoomsRollback(parsed.flags.get("version"), provisioningOptions(parsed.flags)));
   if (scope === "drain") return formatResult(runRoomsDrain(provisioningOptions(parsed.flags)));
   if (scope === "doctor") return formatResult(runRoomsDoctor(provisioningOptions(parsed.flags)));
@@ -879,8 +879,8 @@ function usage(): string {
     "  rooms mcp serve",
     "  rooms setup [--state-dir <absolute-path>]",
     "  rooms setup status [--state-dir <absolute-path>]",
-    "  rooms install [--release-dir <absolute-path>] [--state-dir <absolute-path>] [--install-root <absolute-path>] [--allow-identity-change]",
-    "  rooms upgrade [--release-dir <absolute-path>] [--state-dir <absolute-path>] [--install-root <absolute-path>] [--allow-identity-change]",
+    "  rooms install --release-dir <absolute-path> [--state-dir <absolute-path>] [--install-root <absolute-path>] [--allow-identity-change]",
+    "  rooms upgrade --release-dir <absolute-path> [--state-dir <absolute-path>] [--install-root <absolute-path>] [--allow-identity-change]",
     "  rooms rollback [--version <version>] [--state-dir <absolute-path>] [--install-root <absolute-path>]",
     "  rooms drain [--state-dir <absolute-path>] [--install-root <absolute-path>]",
     "  rooms doctor [--state-dir <absolute-path>] [--install-root <absolute-path>]",
@@ -961,11 +961,6 @@ function normalizeChannelLabel(input: string): string | null {
   if (label.length > 200) throw new Error("channel label must be at most 200 characters");
   if (/\p{Cc}/u.test(label)) throw new Error("channel label must not contain control characters");
   return label;
-}
-
-/** Resolve an npm or Homebrew executable link back to its complete release. */
-export function bundledReleaseDirectory(executablePath = process.execPath): string {
-  return dirname(realpathSync(executablePath));
 }
 
 function isUnknownRecipient(error: unknown): boolean {

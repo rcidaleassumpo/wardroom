@@ -1,13 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
   RuntimeCreateRequest, RuntimeListRequest, RuntimeStatusRequest, RuntimeAttachRequest, RuntimeDetachRequest,
   RuntimeInputRequest, RuntimeResizeRequest, RuntimeSignalRequest, RuntimeTerminateRequest, RuntimeRecoverRequest,
   RuntimeDeliverMessageRequest, RuntimeEventsRequest, RuntimeResponse, RuntimeListResponse, RuntimeOperationResponse,
-  RuntimeEventsResponse,
+  RuntimeEventsResponse, RuntimeRecord,
 } from "../generated/rooms/v1/rooms.js";
 import { RuntimeHostClient } from "./host/client.js";
 import { RuntimeHostSupervisor } from "./host/supervisor.js";
@@ -46,7 +47,7 @@ export function runtimeDeliveryAuditReference(messageId: string, bytesWritten: n
     : { messageId, payload: { bytesWritten } };
 }
 
-const toRecord = (runtime: Runtime) => ({ runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, sessionId: runtime.sessionId, providerThreadId: runtime.providerThreadId, generation: runtime.generation, protocolVersion: runtime.protocolVersion, transportKind: runtime.transportKind, state: runtime.state, machineId: runtime.machineId, createdAt: runtime.createdAt, updatedAt: runtime.updatedAt, endedAt: runtime.endedAt, exitReason: runtime.exitReason });
+const toRecord = (runtime: Runtime): RuntimeRecord => ({ runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, sessionId: runtime.sessionId, providerThreadId: runtime.providerThreadId, cwd: runtime.effectiveCwd, cwdState: runtime.effectiveCwd ? "available" : "unavailable", cwdReason: runtime.effectiveCwd ? null : "legacy-runtime-cwd-unavailable", generation: runtime.generation, protocolVersion: runtime.protocolVersion, transportKind: runtime.transportKind, state: runtime.state, machineId: runtime.machineId, createdAt: runtime.createdAt, updatedAt: runtime.updatedAt, endedAt: runtime.endedAt, exitReason: runtime.exitReason });
 const toBinding = (binding: RuntimeBinding) => ({ bindingId: binding.bindingId, runtimeId: binding.runtimeId, sessionId: binding.sessionId, generation: binding.generation, channelId: binding.channelId, adapterKind: binding.adapterKind, handleRef: binding.handleRef, boundAt: binding.boundAt, unboundAt: binding.unboundAt });
 const toAttachment = (attachment: RuntimeAttachment) => ({ attachmentId: attachment.attachmentId, runtimeId: attachment.runtimeId, sessionId: attachment.sessionId, generation: attachment.generation, viewerId: attachment.viewerId, mode: attachment.mode, outputCursor: attachment.outputCursor.toString(), leaseExpiresAt: attachment.leaseExpiresAt, attachedAt: attachment.attachedAt, detachedAt: attachment.detachedAt });
 const toEvent = (event: RuntimeEvent) => ({ runtimeId: event.runtimeId, generation: event.generation, eventSeq: event.eventSeq, eventId: event.eventId, kind: event.kind, outputCursor: event.outputCursor?.toString() ?? null, messageId: event.messageId, outcome: event.outcome, payload: event.payload, occurredAt: event.occurredAt });
@@ -71,6 +72,14 @@ export interface ProviderIdentityDiscoveryOptions {
   ownershipMarker?: string;
 }
 
+export interface FileMarkerScanState {
+  offset: number;
+  device: number | null;
+  inode: number | null;
+}
+
+const TRANSCRIPT_SCAN_CHUNK_BYTES = 64 * 1024;
+
 /** Resolve aliases once so the provider process and transcript lookup share one cwd. */
 export function canonicalProviderCwd(cwd: string | undefined): string | undefined {
   return cwd === undefined ? undefined : realpathSync.native(cwd);
@@ -89,8 +98,18 @@ export async function discoverProviderThreadId(adapterKind: string | undefined, 
   const ownershipMarker = typeof options.ownershipMarker === "string" && options.ownershipMarker.trim() !== ""
     ? options.ownershipMarker
     : null;
-  if (!cwd || (adapterKind !== "claude" && adapterKind !== "codex" && adapterKind !== "grok")) return null;
+  if (!cwd || (adapterKind !== "claude" && adapterKind !== "codex" && adapterKind !== "grok" && adapterKind !== "agy" && adapterKind !== "gemini")) return null;
   const providerCwd = canonicalProviderCwd(cwd)!;
+  const markerScans = new Map<string, FileMarkerScanState>();
+  const containsOwnershipMarker = (path: string): boolean => {
+    if (!ownershipMarker) return true;
+    let scan = markerScans.get(path);
+    if (!scan) {
+      scan = { offset: 0, device: null, inode: null };
+      markerScans.set(path, scan);
+    }
+    return fileContainsMarker(path, ownershipMarker, scan);
+  };
   // This poll is asynchronous relative to launch, so it never delays the
   // interactive wrapper. A provider whose first briefing arrives minutes late
   // still owns a real conversation, so it runs for as long as the runtime is
@@ -102,12 +121,35 @@ export async function discoverProviderThreadId(adapterKind: string | undefined, 
         for (const sessionId of listGrokSessionCandidates(providerCwd, launchedAfter, homeDirectory)) {
           if (isClaimed(sessionId)) continue;
           if (ownershipMarker) {
-            const eventsPath = join(homeDirectory, ".grok", "sessions", encodeURIComponent(providerCwd), sessionId, "events.jsonl");
-            if (!fileContainsMarker(eventsPath, ownershipMarker)) continue;
+            // Grok's events.jsonl contains lifecycle only. User input, including
+            // the Rooms launch marker, lives in the same session's chat history.
+            const historyPath = join(homeDirectory, ".grok", "sessions", encodeURIComponent(providerCwd), sessionId, "chat_history.jsonl");
+            if (!containsOwnershipMarker(historyPath)) continue;
           }
           if (tryClaim) {
             if (tryClaim(sessionId)) return sessionId;
             continue; // lost the atomic race; try the next candidate / poll
+          }
+          return sessionId;
+        }
+      } else if (adapterKind === "gemini") {
+        for (const candidate of listGeminiSessionCandidates(providerCwd, launchedAfter, homeDirectory)) {
+          if (isClaimed(candidate.sessionId)) continue;
+          if (!containsOwnershipMarker(candidate.path)) continue;
+          if (tryClaim) {
+            if (tryClaim(candidate.sessionId)) return candidate.sessionId;
+            continue;
+          }
+          return candidate.sessionId;
+        }
+      } else if (adapterKind === "agy") {
+        for (const sessionId of listAgySessionCandidates(launchedAfter, homeDirectory)) {
+          if (isClaimed(sessionId)) continue;
+          const transcriptPath = join(homeDirectory, ".gemini", "antigravity-cli", "brain", sessionId, ".system_generated", "logs", "transcript.jsonl");
+          if (!containsOwnershipMarker(transcriptPath)) continue;
+          if (tryClaim) {
+            if (tryClaim(sessionId)) return sessionId;
+            continue;
           }
           return sessionId;
         }
@@ -126,13 +168,13 @@ export async function discoverProviderThreadId(adapterKind: string | undefined, 
         }).filter((value): value is { path: string; created: number } => value !== null && value.created >= launchedAfter - 1_000)
           .sort((a, b) => ownershipMarker ? a.created - b.created : b.created - a.created);
         for (const candidate of candidates) {
-          const first = readFileSync(candidate.path, "utf8").split("\n", 1)[0];
+          const first = readFirstLine(candidate.path);
           try {
             const record = JSON.parse(first) as { sessionId?: unknown; payload?: { id?: unknown; cwd?: unknown } };
             const sessionId = adapterKind === "codex" ? record.payload?.id : record.sessionId;
             const recordCwd: unknown = adapterKind === "codex" ? record.payload?.cwd : providerCwd;
             if (recordCwd !== providerCwd || typeof sessionId !== "string" || sessionId.length === 0 || isClaimed(sessionId)) continue;
-            if (ownershipMarker && !fileContainsMarker(candidate.path, ownershipMarker)) continue;
+            if (!containsOwnershipMarker(candidate.path)) continue;
             if (tryClaim) {
               if (tryClaim(sessionId)) return sessionId;
               continue;
@@ -147,17 +189,94 @@ export async function discoverProviderThreadId(adapterKind: string | undefined, 
   return null;
 }
 
-/** Read a bounded prefix so discovery can match a Rooms session id without loading huge transcripts. */
-export function fileContainsMarker(path: string, marker: string): boolean {
+/** Google Gemini CLI stores JSONL chats under a cwd-hashed project temp dir. */
+function listGeminiSessionCandidates(cwd: string, launchedAfter: number, homeDirectory: string): Array<{ sessionId: string; path: string }> {
+  const root = join(homeDirectory, ".gemini", "tmp");
+  let names: string[] = [];
+  try { names = readdirSync(root, { recursive: true }).map(String); }
+  catch { return []; }
+  const projectHash = createHash("sha256").update(cwd).digest("hex");
+  return names.filter((name) => /(^|[/\\])chats[/\\]session-.*\.jsonl$/.test(name)).map((name) => {
+    const path = join(root, name);
+    try {
+      const stat = statSync(path);
+      if ((stat.birthtimeMs || stat.mtimeMs) < launchedAfter - 1_000) return null;
+      const metadata = JSON.parse(readFirstLine(path)) as { sessionId?: unknown; projectHash?: unknown };
+      return typeof metadata.sessionId === "string" && metadata.projectHash === projectHash
+        ? { sessionId: metadata.sessionId, path, created: stat.birthtimeMs || stat.mtimeMs }
+        : null;
+    } catch { return null; }
+  }).filter((candidate): candidate is { sessionId: string; path: string; created: number } => candidate !== null)
+    .sort((left, right) => left.created - right.created)
+    .map(({ sessionId, path }) => ({ sessionId, path }));
+}
+
+/** AGY uses the brain directory id as its durable conversation id. */
+function listAgySessionCandidates(launchedAfter: number, homeDirectory: string): string[] {
+  const root = join(homeDirectory, ".gemini", "antigravity-cli", "brain");
+  let names: string[] = [];
+  try { names = readdirSync(root); }
+  catch { return []; }
+  return names.map((sessionId) => {
+    const path = join(root, sessionId, ".system_generated", "logs", "transcript.jsonl");
+    try {
+      const stat = statSync(path);
+      return { sessionId, created: stat.birthtimeMs || stat.mtimeMs };
+    } catch { return null; }
+  }).filter((candidate): candidate is { sessionId: string; created: number } =>
+    candidate !== null && candidate.created >= launchedAfter - 1_000)
+    .sort((left, right) => left.created - right.created)
+    .map((candidate) => candidate.sessionId);
+}
+
+/** Read only the provider metadata record, never the whole growing transcript. */
+export function readFirstLine(path: string): string {
   try {
     const size = statSync(path).size;
-    if (size <= 0) return false;
-    const length = Math.min(size, 64 * 1024);
+    if (size <= 0) return "";
+    const length = Math.min(size, TRANSCRIPT_SCAN_CHUNK_BYTES);
     const buffer = Buffer.alloc(length);
     const fd = openSync(path, "r");
     try {
       const read = readSync(fd, buffer, 0, length, 0);
-      return buffer.subarray(0, read).toString("utf8").includes(marker);
+      const body = buffer.subarray(0, read);
+      const newline = body.indexOf(0x0a);
+      return body.subarray(0, newline >= 0 ? newline : read).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Scan one bounded chunk per poll and retain enough overlap to match a marker
+ * split across writes. A fresh provider transcript may put its first prompt
+ * after a large system and project briefing, so a fixed prefix is not an
+ * ownership check.
+ */
+export function fileContainsMarker(path: string, marker: string, state: FileMarkerScanState): boolean {
+  try {
+    const wanted = Buffer.from(marker);
+    if (!wanted.length) return false;
+    const stat = statSync(path);
+    if (stat.size <= 0) return false;
+    if (state.device !== stat.dev || state.inode !== stat.ino || stat.size < state.offset) {
+      state.offset = 0;
+      state.device = stat.dev;
+      state.inode = stat.ino;
+    }
+    const overlap = Math.max(0, wanted.length - 1);
+    const start = Math.max(0, state.offset - overlap);
+    const length = Math.min(stat.size - start, Math.max(TRANSCRIPT_SCAN_CHUNK_BYTES, wanted.length));
+    if (length <= 0) return false;
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(path, "r");
+    try {
+      const read = readSync(fd, buffer, 0, length, start);
+      state.offset = Math.max(state.offset, start + read);
+      return buffer.subarray(0, read).includes(wanted);
     } finally {
       closeSync(fd);
     }
@@ -167,7 +286,8 @@ export function fileContainsMarker(path: string, marker: string): boolean {
 }
 
 /**
- * Grok Build stores lifecycle under ~/.grok/sessions/<encodeURIComponent(cwd)>/<sessionId>/events.jsonl.
+ * Grok Build stores lifecycle under ~/.grok/sessions/<encodeURIComponent(cwd)>/<sessionId>/events.jsonl
+ * and user input under the sibling chat_history.jsonl.
  * Candidates are newest-first for this cwd only — never a global cross-project newest file.
  * Claiming is separate and must be atomic at the repository layer.
  */
@@ -271,7 +391,7 @@ export class RoomsRuntimeService {
     const generation = request.generation ?? 1;
     const launchCwd = canonicalProviderCwd(request.cwd);
     const reconnectSecret = randomBytes(32);
-    const runtime = this.repository.create({ runtimeId, homeAuthorityId: request.homeAuthorityId || this.options.defaultHomeAuthorityId, sessionId: request.sessionId, generation, protocolVersion: request.protocolVersion ?? 1, transportKind: (request.transportKind ?? "localPty") as "localPty" | "structured", machineId: request.machineId ?? this.options.machineId, providerThreadId: request.providerThreadId ?? null, reconnectSecret });
+    const runtime = this.repository.create({ runtimeId, homeAuthorityId: request.homeAuthorityId || this.options.defaultHomeAuthorityId, sessionId: request.sessionId, generation, protocolVersion: request.protocolVersion ?? 1, transportKind: (request.transportKind ?? "localPty") as "localPty" | "structured", machineId: request.machineId ?? this.options.machineId, providerThreadId: request.providerThreadId ?? null, effectiveCwd: launchCwd ?? null, reconnectSecret });
     const stateDir = request.stateDir ?? this.options.stateDir;
     ensureRuntimeSocketDirectory(this.options.socketDirectory);
     const socketPath = runtimeSocketPath(runtime, this.options.socketDirectory);

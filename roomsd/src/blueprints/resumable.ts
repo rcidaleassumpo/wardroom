@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /** Durable, provider-neutral state needed to recreate a suspended member. */
 export interface ProviderConversationRef {
   /** An opaque provider-owned identifier. Never interpret or log its contents. */

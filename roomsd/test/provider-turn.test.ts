@@ -108,6 +108,35 @@ describe("resolveProviderTurn", () => {
     })).toMatchObject({ phase: "unsupported", reason: "provider-turn-unsupported" });
   });
 
+  it("tracks Google Gemini CLI user, tool, and final records", () => {
+    const deliveredAt = "2026-01-01T00:00:00.000Z";
+    expect(resolveProviderTurn({
+      alive: true,
+      adapterKind: "gemini",
+      lastDeliverAt: deliveredAt,
+      transcriptLines: [
+        { timestamp: "2026-01-01T00:00:01.000Z", type: "user" },
+        { timestamp: "2026-01-01T00:00:02.000Z", type: "gemini", toolCalls: [{}] } as never,
+      ],
+    })).toMatchObject({ phase: "tool", reason: "tool_call" });
+    expect(resolveProviderTurn({
+      alive: true,
+      adapterKind: "gemini",
+      lastDeliverAt: deliveredAt,
+      transcriptLines: [
+        { timestamp: "2026-01-01T00:00:03.000Z", type: "gemini", content: "Final" } as never,
+      ],
+    })).toMatchObject({ phase: "idle", reason: "gemini_response" });
+    expect(resolveProviderTurn({
+      alive: true,
+      adapterKind: "gemini",
+      lastDeliverAt: deliveredAt,
+      transcriptLines: [
+        { $push: { messages: { timestamp: "2026-01-01T00:00:04.000Z", type: "error", content: "API failed" } } } as never,
+      ],
+    })).toMatchObject({ phase: "idle", reason: "provider_error" });
+  });
+
   it("readJsonlTail uses a bounded tail and does not require a full-file string", () => {
     clearProviderTurnPathCache();
     const dir = mkdtempSync(join(tmpdir(), "rooms-tail-"));
@@ -148,5 +177,21 @@ describe("resolveProviderTurn", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]?.type).toBe("turn_started");
     expect(lines.some((line) => line.type === "turn_ended")).toBe(false);
+  });
+
+  it("Gemini loader reads only the transcript with the exact native session id", () => {
+    clearProviderTurnPathCache();
+    const home = mkdtempSync(join(tmpdir(), "rooms-gemini-bind-"));
+    const chats = join(home, ".gemini", "tmp", "project", "chats");
+    mkdirSync(chats, { recursive: true });
+    writeFileSync(join(chats, "session-bound.jsonl"), `${JSON.stringify({ sessionId: "bound" })}\n${JSON.stringify({ $push: { messages: { timestamp: "2026-01-01T00:00:01.000Z", type: "gemini", content: "Bound" } } })}\n`);
+    writeFileSync(join(chats, "session-other.jsonl"), `${JSON.stringify({ sessionId: "other" })}\n${JSON.stringify({ type: "gemini", content: "Other" })}\n`);
+    expect(resolveProviderTurn({
+      alive: true,
+      adapterKind: "gemini",
+      lastDeliverAt: "2026-01-01T00:00:00.000Z",
+      transcriptLines: loadProviderTranscriptLines("gemini", "bound", home),
+    })).toMatchObject({ phase: "idle", reason: "gemini_response" });
+    expect(loadProviderTranscriptLines("gemini", "bound", home).some((line) => (line as never as { content?: string }).content === "Other")).toBe(false);
   });
 });

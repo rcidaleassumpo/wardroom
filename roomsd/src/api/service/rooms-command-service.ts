@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RoomsApplication } from "../../domain/application.js";
 import type { SessionRole } from "../../domain/contracts.js";
 import { CredentialAuthenticator } from "../../auth/authenticator.js";

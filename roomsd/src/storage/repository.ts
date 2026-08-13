@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { CursorCodec, RoomsCommandError, type CanonicalImportEvent, type CanonicalMessageCommitInput, type Change, type Channel, type ChannelBroadcastPolicy, type Membership, type MutationReceipt, type Session, type SessionDeliveryMode, type SessionRole, type Snapshot, type ThreadLifecycle } from "../domain/contracts.js";
@@ -28,6 +29,10 @@ export type SessionInspection = Readonly<{
     machineId: string;
     channelId: string | null;
     adapterKind: string | null;
+    /** Exact canonical cwd recorded for the runtime host launch generation. */
+    cwd: string | null;
+    cwdState: "available" | "unavailable";
+    cwdReason: string | null;
     providerThreadId: string | null;
     /**
      * Why providerThreadId looks the way it does. A bare null cannot distinguish
@@ -162,7 +167,7 @@ export class RoomsRepository {
     const memberships = this.rows(`SELECT channel_id, session_id, joined_at, left_at, session_ended_at, role
       FROM memberships WHERE session_id=? ORDER BY joined_at, channel_id`, id).map(membership);
     const row = this.one(`SELECT r.runtime_id, r.home_authority_id, r.generation, r.state,
-        r.machine_id, r.provider_thread_id, r.ended_at, b.channel_id, b.adapter_kind
+        r.machine_id, r.provider_thread_id, r.effective_cwd, r.ended_at, b.channel_id, b.adapter_kind
       FROM runtimes r
       LEFT JOIN runtime_bindings b ON b.runtime_id=r.runtime_id AND b.unbound_at IS NULL
       WHERE r.session_id=?
@@ -206,6 +211,9 @@ export class RoomsRepository {
         machineId: asString(row.machine_id),
         channelId: row.channel_id == null ? null : asString(row.channel_id),
         adapterKind,
+        cwd: row.effective_cwd == null ? null : asString(row.effective_cwd),
+        cwdState: row.effective_cwd == null ? "unavailable" : "available",
+        cwdReason: row.effective_cwd == null ? "legacy-runtime-cwd-unavailable" : null,
         providerThreadId,
         providerThreadIdState: identity.state,
         providerThreadIdReason: identity.reason,
@@ -419,9 +427,13 @@ export class RoomsRepository {
   /** Only providers that persist a transcript can ever report a native thread id. */
   private providerIdentityState(input: { providerThreadId: string | null; runtimeId: string; generation: number; adapterKind: string | null; alive: boolean }): { state: "attached" | "pending" | "unavailable" | "unsupported"; reason: string | null } {
     if (input.providerThreadId) return { state: "attached", reason: null };
-    // Claude/Codex/Grok each persist a native session transcript. Grok's id is
-    // bound at launch into provider_thread_id so inspect never scans globally.
-    const discoverable = input.adapterKind === "claude" || input.adapterKind === "codex" || input.adapterKind === "grok";
+    // Provider adapters persist a native session transcript. Grok and AGY ids
+    // are bound at launch so inspection never adopts a global newest session.
+    const discoverable = input.adapterKind === "claude"
+      || input.adapterKind === "codex"
+      || input.adapterKind === "grok"
+      || input.adapterKind === "agy"
+      || input.adapterKind === "gemini";
     if (input.adapterKind !== null && !discoverable) return { state: "unsupported", reason: `${input.adapterKind} does not persist a native transcript` };
     // Launch records why it gave up, so a stalled discovery is reported as a
     // dead end rather than as a poll the caller should keep waiting on.

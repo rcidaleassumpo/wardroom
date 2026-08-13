@@ -15,7 +15,6 @@ const outputRoot = resolve(process.env.ROOMS_RELEASE_OUT ?? join(root, "release"
 const signingIdentity = process.env.ROOMS_SIGNING_IDENTITY ?? "-";
 const signingMode = process.env.ROOMS_SIGNING_MODE ?? "LOCAL_PROOF_ONLY";
 const allowUnstableIdentity = process.env.ROOMS_ALLOW_UNSTABLE_IDENTITY === "1";
-const federationMode = process.env.ROOMS_RELEASE_FEDERATION ?? "auto";
 const codeIdentifiers = releaseContract.codeIdentifiers;
 const nodeTarget = `node${process.versions.node.split(".")[0]}`;
 const postject = join(root, "node_modules", ".bin", "postject");
@@ -25,7 +24,6 @@ if (!readFileSync(process.execPath).includes(Buffer.from(`${seaFuse}:0`))) throw
 if (!/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/.test(version)) throw new Error("invalid release version");
 if (signingMode !== "LOCAL_PROOF_ONLY" && signingMode !== "DEVELOPER_ID_NOTARIZED") throw new Error("ROOMS_SIGNING_MODE must be LOCAL_PROOF_ONLY or DEVELOPER_ID_NOTARIZED");
 if (signingMode === "DEVELOPER_ID_NOTARIZED" && signingIdentity === "-") throw new Error("a Developer ID identity is required for a notarized release");
-if (!["auto", "enabled", "disabled"].includes(federationMode)) throw new Error("ROOMS_RELEASE_FEDERATION must be auto, enabled, or disabled");
 
 rmSync(outputRoot, { recursive: true, force: true });
 mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
@@ -39,11 +37,8 @@ const bundles = {
 // Bundled entrypoints cannot follow the federation loader's dynamic import;
 // a tree that ships src/federation uses the registering entries, and a
 // single-machine tree falls back to the core entries.
-const federationSourceAvailable = existsSync(join(root, "src/federation/standalone-cli.ts"));
-if (federationMode === "enabled" && !federationSourceAvailable) throw new Error("federation release was requested but its source entrypoint is absent");
-const federationEnabled = federationMode === "enabled" || (federationMode === "auto" && federationSourceAvailable);
-const cliEntry = federationEnabled ? "src/federation/standalone-cli.ts" : "src/cli/standalone.ts";
-const daemonEntry = federationEnabled ? "src/federation/standalone-daemon.ts" : "src/runtime/native/standalone.ts";
+const cliEntry = existsSync(join(root, "src/federation/standalone-cli.ts")) ? "src/federation/standalone-cli.ts" : "src/cli/standalone.ts";
+const daemonEntry = existsSync(join(root, "src/federation/standalone-daemon.ts")) ? "src/federation/standalone-daemon.ts" : "src/runtime/native/standalone.ts";
 await build({ entryPoints: [join(root, cliEntry)], bundle: true, platform: "node", format: "cjs", target: nodeTarget, outfile: bundles.rooms, external: ["node:*"], logLevel: "silent" });
 await build({ entryPoints: [join(root, daemonEntry)], bundle: true, platform: "node", format: "cjs", target: nodeTarget, outfile: bundles.roomsd, external: ["node:*"], logLevel: "silent" });
 
@@ -51,14 +46,7 @@ const binaryPaths = { rooms: join(outputRoot, "rooms"), roomsd: join(outputRoot,
 for (const [name, entry] of Object.entries(bundles)) {
   const config = join(staging, `${name}-sea.json`);
   const blob = join(staging, `${name}-sea.blob`);
-  writeFileSync(config, JSON.stringify({
-    main: entry.slice(staging.length + 1),
-    output: blob.slice(staging.length + 1),
-    disableExperimentalSEAWarning: true,
-    useCodeCache: true,
-    execArgv: ["--disable-warning=ExperimentalWarning"],
-    execArgvExtension: "env",
-  }, null, 2));
+  writeFileSync(config, JSON.stringify({ main: entry.slice(staging.length + 1), output: blob.slice(staging.length + 1), disableExperimentalSEAWarning: true, useCodeCache: true }, null, 2));
   execFileSync(process.execPath, ["--experimental-sea-config", config.slice(staging.length + 1)], { cwd: staging, stdio: "inherit" });
   copyFileSync(process.execPath, binaryPaths[name]);
   chmodSync(binaryPaths[name], 0o755);
@@ -104,9 +92,6 @@ const manifest = {
   minimumMacOS: process.env.ROOMS_MINIMUM_MACOS ?? "13.0",
   protocolVersion: releaseContract.protocolVersion,
   storeSchemaVersion: releaseContract.storeSchemaVersion,
-  features: {
-    federation: federationEnabled,
-  },
   signing: {
     mode: signingMode,
     identity: signingIdentity === "-" ? null : signingIdentity,

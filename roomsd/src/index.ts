@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 export * from "./storage/repository.js";
 export * from "./storage/blueprint-repository.js";
 export * from "./domain/contracts.js";

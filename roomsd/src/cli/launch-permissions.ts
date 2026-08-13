@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RoomsProvider } from "./provider-registry.js";
 
 export const LAUNCH_PERMISSION_MODES = ["headless", "manual"] as const;

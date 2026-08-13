@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";

@@ -1,8 +1,8 @@
 {
-  "name": "wardroom",
+  "name": "roomsd",
   "version": "0.1.0",
   "private": true,
-  "description": "Wardroom reference daemon and rooms CLI for durable agent channels, sessions, and live message delivery.",
+  "description": "Wardroom reference daemon and rooms CLI: durable agent channels, sessions, federation between enrolled machines, and live message delivery.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -28,7 +28,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:release": "node scripts/build-release.mjs",
-    "package:distributions": "node scripts/package-distributions.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"

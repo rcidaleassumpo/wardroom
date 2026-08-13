@@ -16,7 +16,7 @@ rooms() {
 }
 
 start_rooms_demo_daemon() {
-  node "$ROOMS_DEMO_ROOT/roomsd/dist/src/runtime/native/main.js" >"$ROOMS_DEMO_STATE/daemon.log" 2>&1 &
+  node "$ROOMS_DEMO_ROOT/roomsd/dist/src/federation/standalone-daemon.js" >"$ROOMS_DEMO_STATE/daemon.log" 2>&1 &
   ROOMS_DEMO_DAEMON_PID=$!
   for _attempt in {1..50}; do
     [[ -S "$ROOMS_DEMO_STATE/roomsd.sock" ]] && return

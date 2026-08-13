@@ -1,9 +1,9 @@
 # Contributing to Wardroom
 
-Wardroom keeps channels, sessions, messages, runtimes, and delivery
+Rooms keeps channels, sessions, messages, runtimes, and delivery
 provider-neutral. Workflow policy and provider-specific storage do not belong
-in the core. Public v0.1 is single-machine only; federation is not part of this
-cut.
+in the core. The source also contains the SSH-stdio federation surface; its
+release scope remains a separate product decision.
 
 ## Before opening an issue
 
@@ -39,7 +39,9 @@ restart the per-user Wardroom service.
    the macOS runtime host.
 3. Use fake IDs and temporary directories in tests. Never read or write an
    installed `~/.rooms` state directory.
-4. A cross-machine transport needs its own security review before release.
+4. Federation changes must preserve channel-owner admission and signed,
+   one-use runtime capabilities. A new transport needs its own security review
+   before release.
 
 ## Checks
 

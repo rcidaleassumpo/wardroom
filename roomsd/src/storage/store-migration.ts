@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { chmodSync, lstatSync, renameSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";

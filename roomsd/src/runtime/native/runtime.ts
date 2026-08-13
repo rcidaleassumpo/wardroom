@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RoomsServiceHandler } from "../../api/service/handler.js";
 import type { RoomsEndpoint, RoomsListener } from "../../transports/unix/index.js";
 

@@ -87,6 +87,53 @@ describe("rooms session inspect", () => {
     }
   });
 
+  it("returns the runtime-generation cwd without provider or local-host inference", () => {
+    const repository = new RoomsRepository(":memory:");
+    try {
+      for (const sessionId of ["worker-a", "worker-b", "relaunched-worker", "rotation-replacement", "legacy-worker"]) repository.insertSession({ id: sessionId, role: "worker" });
+      const runtimes = new RuntimeRepository(repository.db);
+      const create = (sessionId: string, runtimeId: string, generation: number, machineId: string, effectiveCwd?: string) => {
+        runtimes.create({
+          runtimeId, homeAuthorityId: machineId === "remote-machine" ? "remote-authority" : "home-authority",
+          sessionId, generation, protocolVersion: 4, transportKind: "localPty", machineId,
+          effectiveCwd, reconnectSecret: new Uint8Array(32).fill(generation),
+        });
+        runtimes.markState(runtimeId, generation, "running");
+        runtimes.bind({
+          bindingId: `binding-${runtimeId}`, runtimeId,
+          homeAuthorityId: machineId === "remote-machine" ? "remote-authority" : "home-authority",
+          sessionId, generation, adapterKind: "codex", handleRef: `unix:///runtime/${runtimeId}.sock`,
+          // A false launch-policy cwd must never override the host-bound value.
+          launchPolicyRef: JSON.stringify({ cwd: "/wrong/inferred/path" }),
+        });
+      };
+
+      create("worker-a", "runtime-a", 1, "local-machine", "/work/project-a");
+      create("worker-b", "runtime-b", 1, "local-machine", "/work/project-b");
+      create("relaunched-worker", "runtime-relaunch-1", 1, "remote-machine", "/remote/work/original");
+      runtimes.markState("runtime-relaunch-1", 1, "terminated", "relaunch");
+      create("relaunched-worker", "runtime-relaunch-2", 2, "remote-machine", "/remote/work/relaunched");
+      create("rotation-replacement", "runtime-rotation", 1, "remote-machine", "/remote/work/relaunched");
+      create("legacy-worker", "runtime-legacy", 1, "local-machine");
+
+      expect(repository.inspectSession("worker-a").runtime).toMatchObject({ cwd: "/work/project-a", cwdState: "available", cwdReason: null });
+      expect(repository.inspectSession("worker-b").runtime).toMatchObject({ cwd: "/work/project-b", cwdState: "available", cwdReason: null });
+      expect(repository.inspectSession("relaunched-worker").runtime).toMatchObject({
+        runtimeId: "runtime-relaunch-2", generation: 2, machineId: "remote-machine",
+        cwd: "/remote/work/relaunched", cwdState: "available", cwdReason: null,
+      });
+      expect(repository.inspectSession("rotation-replacement").runtime).toMatchObject({
+        runtimeId: "runtime-rotation", generation: 1, machineId: "remote-machine",
+        cwd: "/remote/work/relaunched", cwdState: "available", cwdReason: null,
+      });
+      expect(repository.inspectSession("legacy-worker").runtime).toMatchObject({
+        cwd: null, cwdState: "unavailable", cwdReason: "legacy-runtime-cwd-unavailable",
+      });
+    } finally {
+      repository.close();
+    }
+  });
+
   it("separates a pending provider identity from one that will never arrive", () => {
     const repository = new RoomsRepository(":memory:");
     try {
@@ -177,6 +224,28 @@ describe("rooms session inspect", () => {
         providerThreadId: "grok-native-abc",
         providerThreadIdState: "attached",
       });
+    } finally {
+      repository.close();
+    }
+  });
+
+  it("treats AGY as discoverable and reports pending until its brain id is bound", () => {
+    const repository = new RoomsRepository(":memory:");
+    try {
+      repository.insertSession({ id: "session-a", role: "worker" });
+      const runtimes = new RuntimeRepository(repository.db);
+      runtimes.create({
+        runtimeId: "runtime-agy", homeAuthorityId: "authority-a", sessionId: "session-a",
+        generation: 1, protocolVersion: 1, transportKind: "localPty", machineId: "machine-a",
+        providerThreadId: null, reconnectSecret: new Uint8Array(32),
+      });
+      runtimes.markState("runtime-agy", 1, "running");
+      runtimes.bind({
+        bindingId: "binding-agy", runtimeId: "runtime-agy", homeAuthorityId: "authority-a",
+        sessionId: "session-a", generation: 1, channelId: null, adapterKind: "agy",
+        handleRef: "unix:///tmp/runtime-agy.sock", launchPolicyRef: null,
+      });
+      expect(repository.inspectSession("session-a").runtime).toMatchObject({ providerThreadIdState: "pending" });
     } finally {
       repository.close();
     }

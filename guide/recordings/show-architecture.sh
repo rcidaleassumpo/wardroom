@@ -22,3 +22,9 @@ print '  daemon: channels, sessions, messages, cursors, authority'
 print '  Go host: one PTY generation, bounded replay, process lifecycle'
 print '  terminal: observer or leased controller; never canonical truth'
 sleep 4
+print
+print -P '%F{magenta}%BFEDERATION%b%f'
+print '  trusted roomsd  <---- mutual enrollment + SSH relay ---->  roomsd'
+print '  channel access: owner-granted admission per peer and channel'
+print '  runtime access: signed, one-use capability scoped to one generation'
+sleep 5

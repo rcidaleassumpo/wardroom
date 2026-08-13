@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // In-memory output ring with byte-offset cursors (PROTOCOL.md §Ring).
 // No file writes on the hot path: the audited agentd behaviour of
 // rewriting a whole scrollback file per PTY chunk is the anti-pattern

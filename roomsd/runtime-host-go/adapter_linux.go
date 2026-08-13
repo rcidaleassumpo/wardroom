@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //go:build linux
 
 // Linux platform adapter for the production Rooms runtime host.

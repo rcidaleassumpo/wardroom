@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";

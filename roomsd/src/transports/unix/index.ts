@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { chmod, lstat, stat, unlink } from "node:fs/promises";
 import type { RoomsServiceHandler } from "../../api/service/handler.js";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import releaseContract from "../../release-contract.json" with { type: "json" };
 
 export const ROOMS_PROTOCOL_MIN_VERSION = releaseContract.protocolVersion;

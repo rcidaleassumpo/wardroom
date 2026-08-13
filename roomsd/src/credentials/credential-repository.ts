@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { SessionRole } from "../domain/contracts.js";
 
 /** The only credential data the command boundary may use. */

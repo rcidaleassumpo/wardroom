@@ -1,8 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import releaseContract from "../release-contract.json" with { type: "json" };
+import { FEDERATION_PROTOCOL_VERSION } from "../src/federation/contracts.js";
+import { RELAY_PROTOCOL_VERSION } from "../src/federation/relay-protocol.js";
 import { HOST_PROTOCOL_VERSION } from "../src/runtime/host/codec.js";
 import { SUPPORTED_SCHEMA_VERSION } from "../src/storage/migrations.js";
 import { DEFAULT_MAX_BUFFERED_DELTA_BATCHES } from "../src/api/subscriptions/subscription.js";
@@ -12,10 +14,6 @@ const roomsdRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = join(roomsdRoot, "..");
 const proto = readFileSync(join(roomsdRoot, "proto/rooms/v1/rooms.proto"), "utf8");
 const specification = readFileSync(join(repositoryRoot, "PROTOCOL.md"), "utf8");
-const optionalFederationVersions = [
-  sourceVersion("src/federation/contracts.ts", "FEDERATION_PROTOCOL_VERSION"),
-  sourceVersion("src/federation/relay-protocol.ts", "RELAY_PROTOCOL_VERSION"),
-].filter((version): version is number => version !== null);
 
 describe("Rooms protocol v4 specification", () => {
   it("names every RPC in the canonical protobuf", () => {
@@ -31,7 +29,8 @@ describe("Rooms protocol v4 specification", () => {
       releaseContract.protocolVersion,
       releaseContract.storeSchemaVersion,
       HOST_PROTOCOL_VERSION,
-      ...optionalFederationVersions,
+      FEDERATION_PROTOCOL_VERSION,
+      RELAY_PROTOCOL_VERSION,
     ]) {
       expect(specification).toContain(`\`${version}\``);
     }
@@ -61,11 +60,3 @@ describe("Rooms protocol v4 specification", () => {
     ]) expect(specification).toContain(statement);
   });
 });
-
-function sourceVersion(path: string, name: string): number | null {
-  const absolutePath = join(roomsdRoot, path);
-  if (!existsSync(absolutePath)) return null;
-  const match = new RegExp(`export const ${name} = (\\d+)`).exec(readFileSync(absolutePath, "utf8"));
-  if (!match) throw new Error(`missing ${name} in ${path}`);
-  return Number(match[1]);
-}

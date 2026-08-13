@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { Cursor, SessionRole } from "../domain/contracts.js";
 
 export type RuntimeState = "creating" | "running" | "recovering" | "crashed" | "exited" | "terminating" | "terminated";
@@ -11,6 +12,8 @@ export interface Runtime {
   sessionId: string;
   /** Provider-native conversation/thread identity used for resume. */
   providerThreadId: string | null;
+  /** Exact canonical directory passed to the runtime host for this generation. */
+  effectiveCwd: string | null;
   generation: number;
   protocolVersion: number;
   transportKind: RuntimeTransport;
@@ -110,6 +113,7 @@ export interface CreateRuntimeInput {
   machineId: string;
   reconnectSecret: Uint8Array;
   providerThreadId?: string | null;
+  effectiveCwd?: string | null;
 }
 
 export interface RuntimeActor {

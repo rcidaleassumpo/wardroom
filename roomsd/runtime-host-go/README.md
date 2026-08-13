@@ -1,4 +1,4 @@
-# Wardroom Go runtime host
+# Rooms Go runtime host
 
 This directory is the production packaging boundary for the per-session Go
 runtime host. The benchmark host under `benchmarks/runtime-host-language` is a
@@ -27,9 +27,9 @@ a machine-readable install manifest. Supported targets are `darwin-arm64`,
 existing files. Provisioning, signing, notarization, and quarantine approval
 are deployment-owned steps; this package does not silently claim them.
 
-Wardroom' toolchain-free release, installer, doctor, and managed service remain
+Rooms' toolchain-free release, installer, doctor, and managed service remain
 Apple Silicon macOS only. This directory does not claim a Linux systemd unit,
-packaged Wardroom daemon/CLI, clean-machine install, or provider launch proof.
+packaged Rooms daemon/CLI, clean-machine install, or provider launch proof.
 
 The operator-facing validation sequence is in [MANUAL-QA.md](MANUAL-QA.md).
 
@@ -46,8 +46,10 @@ strict JSON (unknown fields and trailing data are rejected):
 The non-empty secret is accepted only from fd 3. It is never read from
 argv/environment and is not written to logs, output, events, or diagnostics.
 The host creates the 0700 parent. It also creates a 0600 state file and 0600
-Unix socket atomically. State contains the launch binding, expiry, correlation,
-secret hash, and the plaintext reconnect material needed by the host. Wardroom
+Unix socket atomically.
+
+State contains the launch binding, expiry, correlation,
+secret hash, and the plaintext reconnect material needed by the host. Rooms
 durable storage receives only hash/correlation metadata. The in-memory launch
 copy is wiped after state creation and the active secret is wiped on `wipe`.
 

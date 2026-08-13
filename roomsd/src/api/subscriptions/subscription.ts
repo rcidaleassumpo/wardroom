@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { Change, Cursor, Snapshot } from "../../domain/contracts.js";
 
 export type SnapshotOrDelta =

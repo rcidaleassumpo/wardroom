@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { CanonicalMessageCommitInput, Channel, ChannelBroadcastPolicy, MutationReceipt, Session, SessionRole } from "./contracts.js";
 import { RoomsCommandError } from "./contracts.js";
 
@@ -85,11 +86,11 @@ export class RoomsApplication {
     return this.store.command((store) => {
       const actor = store.currentSession(context.actorSessionId);
       const channel = store.currentChannel(channelId);
-      // An owned channel is closable only by its owning operator. A channel
-      // with no recorded owner predates ownership (or was registered through
-      // an ownerless path) and is closable by any operator.
+      // Keep a channel manageable after its original operator retires. The
+      // owner may close it, as may a later operator that is an active member.
       const ownedByAnotherOperator = channel !== null && channel.ownerOperatorSessionId !== null && channel.ownerOperatorSessionId !== actor?.id;
-      if (!actor || actor.endedAt || actor.role !== "operator" || context.role !== "operator" || ownedByAnotherOperator) throw new RoomsCommandError("unauthorized");
+      const activeOperatorMember = channel !== null && store.isActiveMember(channelId, context.actorSessionId, "operator");
+      if (!actor || actor.endedAt || actor.role !== "operator" || context.role !== "operator" || (ownedByAnotherOperator && !activeOperatorMember)) throw new RoomsCommandError("unauthorized");
       return store.closeChannel(channelId);
     });
   }
@@ -98,7 +99,8 @@ export class RoomsApplication {
       const actor = store.currentSession(context.actorSessionId);
       const channel = store.currentChannel(channelId);
       const ownedByAnotherOperator = channel !== null && channel.ownerOperatorSessionId !== null && channel.ownerOperatorSessionId !== actor?.id;
-      if (!actor || actor.endedAt || actor.role !== "operator" || context.role !== "operator" || ownedByAnotherOperator) throw new RoomsCommandError("unauthorized");
+      const activeOperatorMember = channel !== null && store.isActiveMember(channelId, context.actorSessionId, "operator");
+      if (!actor || actor.endedAt || actor.role !== "operator" || context.role !== "operator" || (ownedByAnotherOperator && !activeOperatorMember)) throw new RoomsCommandError("unauthorized");
       if (!channel) throw new RoomsCommandError("unknownChannel");
       return store.updateChannelLabel(channelId, label);
     });

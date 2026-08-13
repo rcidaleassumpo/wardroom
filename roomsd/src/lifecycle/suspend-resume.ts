@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { AllowlistedLaunchConfig, LayoutMetadata, MemberIntent, ProviderConversationRef, ResumableChannelBlueprint, ResumableMemberBlueprint } from "../blueprints/resumable.js";
 import { cloneBlueprint, validateBlueprint } from "../blueprints/resumable.js";
 

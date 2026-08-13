@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { BlueprintStore, QueuedCanonicalDelivery } from "../lifecycle/suspend-resume.js";
 import type { RuntimeOwnershipStore } from "../runtime/codex-adapter.js";

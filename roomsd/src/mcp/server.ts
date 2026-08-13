@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import type { RoomsCLIBackend } from "../cli/backend.js";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { AuthenticatedCommandContext, DomainRepository } from "../domain/application.js";
 import type { CredentialRecord, CredentialRepository } from "../credentials/credential-repository.js";

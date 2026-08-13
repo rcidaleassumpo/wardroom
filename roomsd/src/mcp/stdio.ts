@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
 
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";

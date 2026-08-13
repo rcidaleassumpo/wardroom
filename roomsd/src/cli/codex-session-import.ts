@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";

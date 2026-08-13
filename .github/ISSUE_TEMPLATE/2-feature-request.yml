@@ -32,7 +32,7 @@ body:
     id: boundary
     attributes:
       label: Product boundary
-      description: State which Wardroom-owned surface changes and which provider, workflow, or operating-system concerns stay outside it.
+      description: State which Rooms-owned surface changes and which provider, workflow, or operating-system concerns stay outside it.
     validations:
       required: true
   - type: textarea

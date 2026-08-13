@@ -1,0 +1,1518 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "cbf1372868b4603d40c2dbed0e29209a32c692b0",
+  "files": [
+    {
+      "path": ".github/ISSUE_TEMPLATE/1-bug-report.yml",
+      "sha256": "aa990fc8311cbd21050b0cc245ad7cd9e78138949d36bf0c4b6e7c26cc5e41e3",
+      "mode": "0644",
+      "bytes": 2648
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/2-feature-request.yml",
+      "sha256": "385377849b01ee2c2673180cb67d5a5ed6c0f533c44f6bb6e2c775e242a6e6c1",
+      "mode": "0644",
+      "bytes": 1636
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/3-protocol-design.yml",
+      "sha256": "dd1201dd5b347f2e5c2ba2ba5009fec802b514100184272c1114ea5282005025",
+      "mode": "0644",
+      "bytes": 3027
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "sha256": "49a8b9b0a678c6a31420d85fa48951a5c146b257fc6fa3fc2fa3982fb811bc26",
+      "mode": "0644",
+      "bytes": 250
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "9776afa3240912691ee2620fce6b3b0e89356a029e62efe72cb88cbd164c8b05",
+      "mode": "0644",
+      "bytes": 5035
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "b3363d367a35f424defd82c5e6a1f1eea8548838eb82a5f301664a975dc76d45",
+      "mode": "0644",
+      "bytes": 126
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "sha256": "c3af2ce9c6b5bb66cd88c23396d3ea714b6123cc0212335cddc8d9a375d4311f",
+      "mode": "0644",
+      "bytes": 3335
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "mode": "0644",
+      "bytes": 11358
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "1b8afe2bf8adc2d725d29d5f69ff682e153846691ce9d677963d29d544e47f1a",
+      "mode": "0644",
+      "bytes": 44
+    },
+    {
+      "path": "PROTOCOL.md",
+      "sha256": "e2b2ced47d7c943e2faef41c706ae40e3d204568987219f6e3efafaaf6591f65",
+      "mode": "0644",
+      "bytes": 22549
+    },
+    {
+      "path": "README.md",
+      "sha256": "4e1551086ffe013b0418ee1ed24c40e427b4327666f1729860386569304c9d05",
+      "mode": "0644",
+      "bytes": 6850
+    },
+    {
+      "path": "SECURITY.md",
+      "sha256": "f4278bb130f67af7092064ff4f21eb8dd93c4e1c9481fbd6842c58d705dcb888",
+      "mode": "0644",
+      "bytes": 4073
+    },
+    {
+      "path": "design/0001-atomic-channel-claim.md",
+      "sha256": "ce0562cb65e12269442b8bda3be51fed432f310c37c974a9aabd044263ea868d",
+      "mode": "0644",
+      "bytes": 1192
+    },
+    {
+      "path": "guide/ARCHITECTURE.md",
+      "sha256": "571860379f3adea3cebd7cb49f9d0d5d492b49832e0ef17551b6fae0a9d97710",
+      "mode": "0644",
+      "bytes": 3742
+    },
+    {
+      "path": "guide/README.md",
+      "sha256": "79e0047ca6813e97f4551e24c6a12c0fc2abcfbc5c99c7aa9058104287f404af",
+      "mode": "0644",
+      "bytes": 4743
+    },
+    {
+      "path": "guide/recordings/architecture.tape",
+      "sha256": "7a662db6dce0cd422cc2a6307ac1e909ba99650eab3c63c40b134ec16055672d",
+      "mode": "0644",
+      "bytes": 225
+    },
+    {
+      "path": "guide/recordings/demo-env.sh",
+      "sha256": "3aeac47368e0a6c397ac54fe6dce274a1905bf2a0dca3f5702c502263e6226d7",
+      "mode": "0755",
+      "bytes": 1163
+    },
+    {
+      "path": "guide/recordings/federation-safety.tape",
+      "sha256": "b9ea8995df57bc71cecd43814aba4ed487f39fefd08eb4ae7ef66061ec4d9f18",
+      "mode": "0644",
+      "bytes": 961
+    },
+    {
+      "path": "guide/recordings/local-quickstart.tape",
+      "sha256": "69896d426b7bb9335dc58d882a771215a8dd52c0c7f61b3e8e80680302acc909",
+      "mode": "0644",
+      "bytes": 1597
+    },
+    {
+      "path": "guide/recordings/render.sh",
+      "sha256": "642165548ab12e5830ccf3c727e5b00e1815fbe1136e26bab62392dc857462f3",
+      "mode": "0755",
+      "bytes": 1102
+    },
+    {
+      "path": "guide/recordings/show-architecture.sh",
+      "sha256": "2e99a7531e8fddf907eda73983eb891e515f79413a368302e50515fc4ae2ee34",
+      "mode": "0755",
+      "bytes": 968
+    },
+    {
+      "path": "guide/videos/README.md",
+      "sha256": "bbfe10034084f24810f98a76e88a32c4ba891083d8654179f9a48dd722c8ae30",
+      "mode": "0644",
+      "bytes": 713
+    },
+    {
+      "path": "guide/videos/architecture.mp4",
+      "sha256": "36d4da8623334243e008ce9d3b6efd824f2e8e297ae3bb68eefedac1c7e0ba21",
+      "mode": "0644",
+      "bytes": 173048
+    },
+    {
+      "path": "guide/videos/federation-safety.mp4",
+      "sha256": "84d4d41a28e4a24928829f09191ae336fe76ed5997eeb56fbd06acb484496a35",
+      "mode": "0644",
+      "bytes": 652856
+    },
+    {
+      "path": "guide/videos/local-quickstart.mp4",
+      "sha256": "7dff28452b1194252567f630925eeec14e466516aabb7cf7ed330fd0e85758a3",
+      "mode": "0644",
+      "bytes": 1340122
+    },
+    {
+      "path": "roomsd/.gitignore",
+      "sha256": "eceabde80ea374a3cbd1cb0b291baa332f9d01cf2a290aa29c198ac1dab2b5ad",
+      "mode": "0644",
+      "bytes": 64
+    },
+    {
+      "path": "roomsd/.npmrc",
+      "sha256": "3a951f66e7e0f3e2dd1832473a871357c4a507b51100636b73bcf6ff0dd78b6c",
+      "mode": "0644",
+      "bytes": 37
+    },
+    {
+      "path": "roomsd/Dockerfile",
+      "sha256": "400c537587ad455902ee8fb2752fefeded7350c3b47de83c9971bdd77d9f26a4",
+      "mode": "0644",
+      "bytes": 721
+    },
+    {
+      "path": "roomsd/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "mode": "0644",
+      "bytes": 11358
+    },
+    {
+      "path": "roomsd/NOTICE",
+      "sha256": "1b8afe2bf8adc2d725d29d5f69ff682e153846691ce9d677963d29d544e47f1a",
+      "mode": "0644",
+      "bytes": 44
+    },
+    {
+      "path": "roomsd/compose.yml",
+      "sha256": "a0424ec70821972ab42c05df149f261faf6aa2c17d2f3b2abb28f31c370a029c",
+      "mode": "0644",
+      "bytes": 545
+    },
+    {
+      "path": "roomsd/docker/README.md",
+      "sha256": "68bd3c1de38369a1e06e4b5d5b4bb19bee40a291826b40a7e8b068b869604ba1",
+      "mode": "0644",
+      "bytes": 764
+    },
+    {
+      "path": "roomsd/docker/healthcheck.mjs",
+      "sha256": "c2ad2a48aea2e3dec775f5cc3b586137e682f98f2667919e701d7b118d46eabe",
+      "mode": "0644",
+      "bytes": 306
+    },
+    {
+      "path": "roomsd/package-lock.json",
+      "sha256": "3fb5158485d231aec37cc437d1c04878891f1291cdb4694b787b3b819b195ca4",
+      "mode": "0644",
+      "bytes": 59891
+    },
+    {
+      "path": "roomsd/package.json",
+      "sha256": "ae0e6a451a1afc439425352763df403ef036a6fa6879eca1f8faf761b69b09f6",
+      "mode": "0644",
+      "bytes": 1253
+    },
+    {
+      "path": "roomsd/proto/rooms/v1/rooms.proto",
+      "sha256": "c1a53ea41b331f275d472491e9adab3b4ed01212019e87b2c7245b966db7dca9",
+      "mode": "0644",
+      "bytes": 12465
+    },
+    {
+      "path": "roomsd/release-contract.json",
+      "sha256": "ee447de0bfd7f1f096f8d8c165d76f039b823d1a1b76b6f435c9d4b23c3bd958",
+      "mode": "0644",
+      "bytes": 203
+    },
+    {
+      "path": "roomsd/runtime-host-go/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "mode": "0644",
+      "bytes": 0
+    },
+    {
+      "path": "roomsd/runtime-host-go/README.md",
+      "sha256": "6580c6d446572dbd20d27e2500d28842a29fbfdff44909d5e5dd7e4170ade5b5",
+      "mode": "0644",
+      "bytes": 3744
+    },
+    {
+      "path": "roomsd/runtime-host-go/adapter_darwin.go",
+      "sha256": "c1ba60bb375254fae39f4ae2fa8a219d69d1797647c68c4ee97d552122d433b6",
+      "mode": "0644",
+      "bytes": 5539
+    },
+    {
+      "path": "roomsd/runtime-host-go/adapter_linux.go",
+      "sha256": "600647dca81c69608c0c7b487b88752ebaac29756a57ee5b3754f17f4371ffdc",
+      "mode": "0644",
+      "bytes": 3962
+    },
+    {
+      "path": "roomsd/runtime-host-go/adapter_unix_test.go",
+      "sha256": "9f8fd4d415fbe8b436574c53355d19f6fcd5cb465d7f060ba636c3902e58937c",
+      "mode": "0644",
+      "bytes": 2489
+    },
+    {
+      "path": "roomsd/runtime-host-go/build.sh",
+      "sha256": "1ca5da218c7e74e932e80aeb5ae5469b7ee0052c985438e50159e04daec9f80e",
+      "mode": "0755",
+      "bytes": 704
+    },
+    {
+      "path": "roomsd/runtime-host-go/enrollment.go",
+      "sha256": "27297fcb1c4050924a8c936fb1e501d2b50101e43870c80538d39a599be9696c",
+      "mode": "0644",
+      "bytes": 5260
+    },
+    {
+      "path": "roomsd/runtime-host-go/go.mod",
+      "sha256": "89c421c607bfab4118e481ebb2791edd2481381fb609b2ef3694b6dd4b0559b7",
+      "mode": "0644",
+      "bytes": 178
+    },
+    {
+      "path": "roomsd/runtime-host-go/install.sh",
+      "sha256": "5f639c5a9217151cc02f0c6471cff1040b71964839b69924b08889d6f8bbe77b",
+      "mode": "0755",
+      "bytes": 623
+    },
+    {
+      "path": "roomsd/runtime-host-go/main.go",
+      "sha256": "d37d1d75b2a0a4e0e3f6f3f50f18bc5aea40a2c9909187137fe331bdccc0be93",
+      "mode": "0644",
+      "bytes": 23698
+    },
+    {
+      "path": "roomsd/runtime-host-go/main_test.go",
+      "sha256": "18f20159a10ee907d2730484a53eaa955d9a85f5ce2eb6bcfeddc1229115041b",
+      "mode": "0644",
+      "bytes": 2732
+    },
+    {
+      "path": "roomsd/runtime-host-go/manual-fixture.py",
+      "sha256": "aaba6f632a9f42530df9e76dc7f62fa9222da73e8a96bb86715c6ecb0a7ad48a",
+      "mode": "0755",
+      "bytes": 5147
+    },
+    {
+      "path": "roomsd/runtime-host-go/proto.go",
+      "sha256": "e3be3d0c5133e47d8111f9d0ae7fd18dc7a00f98b6f3fe938008755fafaa770c",
+      "mode": "0644",
+      "bytes": 5539
+    },
+    {
+      "path": "roomsd/runtime-host-go/ring.go",
+      "sha256": "6637e98741b533fc2955b0c001644d604d39d311d44175e76a1ceca77b1cab9d",
+      "mode": "0644",
+      "bytes": 1670
+    },
+    {
+      "path": "roomsd/schema.config.json",
+      "sha256": "94b3bdbc532d049a67166cd029b9e2b0e8fbae72956e058e5b9ec0acce5497da",
+      "mode": "0644",
+      "bytes": 190
+    },
+    {
+      "path": "roomsd/scripts/build-release.mjs",
+      "sha256": "819ec8ed77426011c5097fbba7f9c2c95632c6da32e1f4f26edbb3f3eea46938",
+      "mode": "0644",
+      "bytes": 8993
+    },
+    {
+      "path": "roomsd/src/api/errors.ts",
+      "sha256": "75f4940d2678892df32bcf5c468085c30167a66ce3669754c16b8a5732e25ec4",
+      "mode": "0644",
+      "bytes": 1720
+    },
+    {
+      "path": "roomsd/src/api/protocol-compatibility.ts",
+      "sha256": "7d55c628cdd791dec0a80e646045745d1957e2750d27b3bad7f2205136e9deb0",
+      "mode": "0644",
+      "bytes": 1281
+    },
+    {
+      "path": "roomsd/src/api/service/handler.ts",
+      "sha256": "3f9594ad422a399836f39209e53d4ff249e190303800a862ccaa9bd1a60bfbbf",
+      "mode": "0644",
+      "bytes": 12173
+    },
+    {
+      "path": "roomsd/src/api/service/rooms-command-service.ts",
+      "sha256": "92127a446c7840912e6815b4c444ff137bc1b1ee3846ff3af5c88058b79d30ab",
+      "mode": "0644",
+      "bytes": 1578
+    },
+    {
+      "path": "roomsd/src/api/subscriptions/subscription.ts",
+      "sha256": "e0c729c07c73c2062392918f279add44e623c620bf96c65dec02864dfd0f2188",
+      "mode": "0644",
+      "bytes": 5032
+    },
+    {
+      "path": "roomsd/src/auth/authenticator.ts",
+      "sha256": "cd10c1818755b79f1b5a05ee1948d7a0123aaae39214caa2662eeb93bf225506",
+      "mode": "0644",
+      "bytes": 2528
+    },
+    {
+      "path": "roomsd/src/blueprints/resumable.ts",
+      "sha256": "6695595eff427756579ef4be72e6e4d1b82f45e29df90ce4f64b10136ff44d1c",
+      "mode": "0644",
+      "bytes": 2614
+    },
+    {
+      "path": "roomsd/src/cli/agent-briefing.ts",
+      "sha256": "4a51a33ce9b5a9ac1bd1b751c70ec8fe01a0d196e97c749f4439236dad387ddc",
+      "mode": "0644",
+      "bytes": 2251
+    },
+    {
+      "path": "roomsd/src/cli/backend.ts",
+      "sha256": "229e38f887ffb6505d5178df074974dfeb0c75b3f412fb8ff3ff3d287efca8f3",
+      "mode": "0644",
+      "bytes": 8216
+    },
+    {
+      "path": "roomsd/src/cli/codex-minimal-profile.ts",
+      "sha256": "484f9cfd34129edb9c7f427526c6b0775a485ea91582110e47acab2b7fb5e2f7",
+      "mode": "0644",
+      "bytes": 4010
+    },
+    {
+      "path": "roomsd/src/cli/codex-session-import.ts",
+      "sha256": "1ce7f7e8eaec498c884fda5f7db0d214ebd749556673171d81c618ed5c566009",
+      "mode": "0644",
+      "bytes": 4971
+    },
+    {
+      "path": "roomsd/src/cli/daemon-runtime-client.ts",
+      "sha256": "3e8d5be2ae1aafb470367282fcb008c11a01089fdeed3a9826ef395f2d0bbf45",
+      "mode": "0644",
+      "bytes": 8836
+    },
+    {
+      "path": "roomsd/src/cli/default-backend.ts",
+      "sha256": "528ae39788aee811839a03198f9c332a6bca2c7de6c9ea592b3d3abac2147626",
+      "mode": "0644",
+      "bytes": 40152
+    },
+    {
+      "path": "roomsd/src/cli/federation.ts",
+      "sha256": "7e3f4468d623f70cf2af44e051cb9131ff4d37adb6d8a3be05b9097e29addf0c",
+      "mode": "0644",
+      "bytes": 23125
+    },
+    {
+      "path": "roomsd/src/cli/launch-permissions.ts",
+      "sha256": "42e6c5d3208d2a7b67cd77bc98e4fb0a557c44d79b2a0e4ef3b99166037c453d",
+      "mode": "0644",
+      "bytes": 3069
+    },
+    {
+      "path": "roomsd/src/cli/lifecycle.ts",
+      "sha256": "fb1ad7049fd22f6e8779fb0fda5cdf0c6a1e69fc1a32b803dc2690b522e0373f",
+      "mode": "0644",
+      "bytes": 2517
+    },
+    {
+      "path": "roomsd/src/cli/machine-inventory.ts",
+      "sha256": "ac6c9a39b690d03cb5a7a4c3e28bc460eca453014da51c12e8818162393aeb18",
+      "mode": "0644",
+      "bytes": 11575
+    },
+    {
+      "path": "roomsd/src/cli/main.ts",
+      "sha256": "b23368ebbe421d3881c4d2b9fa8f6eb89f294d94b5ef645321234d70fc86bf4e",
+      "mode": "0755",
+      "bytes": 66879
+    },
+    {
+      "path": "roomsd/src/cli/provider-launch-options.ts",
+      "sha256": "3de841c726f781fcb5b51db082736947e6eb30c491f7b6f9dff856192200348e",
+      "mode": "0644",
+      "bytes": 4421
+    },
+    {
+      "path": "roomsd/src/cli/provider-registry.ts",
+      "sha256": "0781a7e3cfc51fdf66204666b3de254cdb3488a24db3f64315be4866661356f2",
+      "mode": "0644",
+      "bytes": 14828
+    },
+    {
+      "path": "roomsd/src/cli/provider-run.ts",
+      "sha256": "dbe06680f3dd54737a13431ed36807560aca2cd04c20ada2727d9923042944ef",
+      "mode": "0644",
+      "bytes": 1024
+    },
+    {
+      "path": "roomsd/src/cli/reasoning-effort.ts",
+      "sha256": "5f18b98ddf5248965a5c9dd4ac443dd69d9eccc91c168b7afcb889e0b9263190",
+      "mode": "0644",
+      "bytes": 2658
+    },
+    {
+      "path": "roomsd/src/cli/remote-runtime-attach.ts",
+      "sha256": "d12d113b43dc8745b77258a62b8222f0db1c0d7899563656f36441f44191cf32",
+      "mode": "0644",
+      "bytes": 7128
+    },
+    {
+      "path": "roomsd/src/cli/runtime-attach.ts",
+      "sha256": "ae7c54ef07f63aaf33af8325ef755ee48cbb55bdf99e530b79e5af157607ebf6",
+      "mode": "0644",
+      "bytes": 7099
+    },
+    {
+      "path": "roomsd/src/cli/runtime-drain.ts",
+      "sha256": "245927a0a933242ee8fd18d35b4a228d8c3a894cb79c1dc8a441bc97a5d500cc",
+      "mode": "0644",
+      "bytes": 6826
+    },
+    {
+      "path": "roomsd/src/cli/setup.ts",
+      "sha256": "2a5dd96145781d10ae7aa8226ad747493aa48eb4d7f3d543d133035ec931ca71",
+      "mode": "0644",
+      "bytes": 350
+    },
+    {
+      "path": "roomsd/src/cli/shellenv.ts",
+      "sha256": "fbbf43e65fda74c35733e1400391114bf469e7d11698877c058540359f03c939",
+      "mode": "0644",
+      "bytes": 3117
+    },
+    {
+      "path": "roomsd/src/cli/skills.ts",
+      "sha256": "7fbfdd9110602498582f877784926dfdb3ade71fccc472d3f79b8237ee18a774",
+      "mode": "0644",
+      "bytes": 15222
+    },
+    {
+      "path": "roomsd/src/cli/standalone.ts",
+      "sha256": "3b80042159fe8ac0178af24c9233fe06d049ff15ad1ec0f0657292ccec5c8997",
+      "mode": "0644",
+      "bytes": 304
+    },
+    {
+      "path": "roomsd/src/credentials/credential-repository.ts",
+      "sha256": "1ae66fa912a9c89cc424efce4bb1a3cd6027b9531f7b9e4420b30a891b44c732",
+      "mode": "0644",
+      "bytes": 997
+    },
+    {
+      "path": "roomsd/src/domain/application.ts",
+      "sha256": "1acab711e53fc112c13ac2b746f7b16c8090b971b7eafbf826d3816e660cb879",
+      "mode": "0644",
+      "bytes": 12709
+    },
+    {
+      "path": "roomsd/src/domain/contracts.ts",
+      "sha256": "33b95de51040297d380b0d94629f753d1e61b022731cc053ac675889d9f8f379",
+      "mode": "0644",
+      "bytes": 2731
+    },
+    {
+      "path": "roomsd/src/domain/index.ts",
+      "sha256": "f842b84d6166bf1e425db7578e1df17a97a916f4e734aa8c4cb150bfe02e392e",
+      "mode": "0644",
+      "bytes": 131
+    },
+    {
+      "path": "roomsd/src/domain/message-provenance.ts",
+      "sha256": "b4fba43456f321b8618947acbf6d25d2df03757d71be54bdfd677ea906bddacc",
+      "mode": "0644",
+      "bytes": 675
+    },
+    {
+      "path": "roomsd/src/federation-loader.ts",
+      "sha256": "5ed2dac1dbc134a647ed4d25414d775f7694b904cd9c13e11a2bd9fe0ec959e2",
+      "mode": "0644",
+      "bytes": 4309
+    },
+    {
+      "path": "roomsd/src/federation/channel-home-handler.ts",
+      "sha256": "8fab0656ede3f04aaa851f37eeb0f2629a9b99aff1a8ad2667831c89cbe9fa62",
+      "mode": "0644",
+      "bytes": 9748
+    },
+    {
+      "path": "roomsd/src/federation/channel-result.ts",
+      "sha256": "224adbf79f13b7cbaf2cfaaf84c34bc786fad6e254348ecc74f5de763a9efa65",
+      "mode": "0644",
+      "bytes": 2522
+    },
+    {
+      "path": "roomsd/src/federation/channel-route-store.ts",
+      "sha256": "615d9f7f4cf0cae6a2e45427994f2a89c60ddbdaaca285ed0a208110061c6606",
+      "mode": "0644",
+      "bytes": 8398
+    },
+    {
+      "path": "roomsd/src/federation/channel-subscription-manager.ts",
+      "sha256": "53e740d9269767d85ad1ec848d960a886bee52a84521a678c760ccbb9b085ca2",
+      "mode": "0644",
+      "bytes": 11349
+    },
+    {
+      "path": "roomsd/src/federation/codec.ts",
+      "sha256": "5d9bda0310511d7319c0082e0152ed367ff9aca7f6751ac560de10fc4cb92d55",
+      "mode": "0644",
+      "bytes": 21768
+    },
+    {
+      "path": "roomsd/src/federation/contracts.ts",
+      "sha256": "1fa68ce05c4aa8a663b939269424200a8ed2a683d153756fe43814785886e66b",
+      "mode": "0644",
+      "bytes": 6229
+    },
+    {
+      "path": "roomsd/src/federation/enroll-remote-step.ts",
+      "sha256": "80942ba11cba02f9d7e3a6c8ce0a045c5b4a80ff6cb9dae1aeb3b58cd27f8973",
+      "mode": "0644",
+      "bytes": 8178
+    },
+    {
+      "path": "roomsd/src/federation/enrollment-crypto.ts",
+      "sha256": "f273aecd1504c87dfaed2abddd6396ace5cb50d0f66f5ca6ac33ea4738002098",
+      "mode": "0644",
+      "bytes": 4491
+    },
+    {
+      "path": "roomsd/src/federation/enrollment.ts",
+      "sha256": "5fde00925b982c87f888519ab9e7384a925b532eee7a120875ac07cd6b97d24a",
+      "mode": "0644",
+      "bytes": 29223
+    },
+    {
+      "path": "roomsd/src/federation/index.ts",
+      "sha256": "963ae57f79f6f96d3bfa8ac13a306c052059e525d5f7059b7852f34b3410de74",
+      "mode": "0644",
+      "bytes": 254
+    },
+    {
+      "path": "roomsd/src/federation/machine-inventory-handler.ts",
+      "sha256": "8592198c3e538ea707cf763148d64981cfcbc5f8d929a22e4ca79f58c92b1191",
+      "mode": "0644",
+      "bytes": 2390
+    },
+    {
+      "path": "roomsd/src/federation/machine-route-store.ts",
+      "sha256": "85f4111dbe5baa37134f4e2ea5af205f0dda1468ae1636686369be3359c46b7b",
+      "mode": "0644",
+      "bytes": 3603
+    },
+    {
+      "path": "roomsd/src/federation/peer-trust.ts",
+      "sha256": "7d68fd8dc3a1665c5f2dcbc50003611838c446d755e6fc6742b58ac5de36cda6",
+      "mode": "0644",
+      "bytes": 16028
+    },
+    {
+      "path": "roomsd/src/federation/plug.ts",
+      "sha256": "34b8b01d2cfe80cbcbf735cb614ce79f2f03567c0d3fe32093ca2083e4228ee9",
+      "mode": "0644",
+      "bytes": 1432
+    },
+    {
+      "path": "roomsd/src/federation/relay-connection-lock.ts",
+      "sha256": "a36db911667afae2af204da82bf4460eb9d3151b475f9f765367207a69dba7c3",
+      "mode": "0644",
+      "bytes": 4138
+    },
+    {
+      "path": "roomsd/src/federation/relay-connection.ts",
+      "sha256": "fd972af467c6cc7ed93d89a35b9af6dfae92bdb98c8ecc7aa9874ad5ed1739ae",
+      "mode": "0644",
+      "bytes": 40334
+    },
+    {
+      "path": "roomsd/src/federation/relay-local-server.ts",
+      "sha256": "d19ea1afdaa2bf4cf7d8979d8dc769871158f0d096fea2eeec02b836b64c1052",
+      "mode": "0644",
+      "bytes": 6859
+    },
+    {
+      "path": "roomsd/src/federation/relay-protocol.ts",
+      "sha256": "7d6b4dadec1c91e3f3c4ed02ff2c2b122d2393faae6d72c44093ecdfa4362502",
+      "mode": "0644",
+      "bytes": 36109
+    },
+    {
+      "path": "roomsd/src/federation/relay-reconnect.ts",
+      "sha256": "151a29f5606c3b76b0cfbd2526b3a18d5e86844e094f725d34ea09eaf443cfbe",
+      "mode": "0644",
+      "bytes": 6298
+    },
+    {
+      "path": "roomsd/src/federation/relay-serve-stdio.ts",
+      "sha256": "eb3c3785195fc76b0bb818f8a229b39b779012275583f62b5cabfaa1768187fb",
+      "mode": "0644",
+      "bytes": 5198
+    },
+    {
+      "path": "roomsd/src/federation/remote-command-port.ts",
+      "sha256": "b7119340eb685aaff6be5667c5feb50afd5d40b898d89d29544929b1ff84a37b",
+      "mode": "0644",
+      "bytes": 4774
+    },
+    {
+      "path": "roomsd/src/federation/ssh-command-adapter.ts",
+      "sha256": "bb86e0cb6ace4709a643c4a047e86fd6b3a28a1d3cedab1a9d4ebb2ebdaae55d",
+      "mode": "0644",
+      "bytes": 8927
+    },
+    {
+      "path": "roomsd/src/federation/ssh-connect.ts",
+      "sha256": "668ff260fb78ecb47e3f00242102d09344c9199c4de277c90a857d8d48ab43c2",
+      "mode": "0644",
+      "bytes": 10702
+    },
+    {
+      "path": "roomsd/src/federation/ssh-relay-transport.ts",
+      "sha256": "c63ab17cefc2e22678bd906495fdf54fd42f9e0e6b80e956e0b29eebd6117a1a",
+      "mode": "0644",
+      "bytes": 6826
+    },
+    {
+      "path": "roomsd/src/federation/standalone-cli.ts",
+      "sha256": "eec6854cacace6b5535bfc0e79b60729825905fce850c5641869a5e436570b39",
+      "mode": "0644",
+      "bytes": 708
+    },
+    {
+      "path": "roomsd/src/federation/standalone-daemon.ts",
+      "sha256": "3df735de303601d31b448d43cc771ea200999e8f8400bb76080dff0db38bce5a",
+      "mode": "0644",
+      "bytes": 617
+    },
+    {
+      "path": "roomsd/src/federation/terminal-capability.ts",
+      "sha256": "61e63bdf496c69889c0ac907b15fd963f8c0da5ee8b48a7ae33be229967b3e63",
+      "mode": "0644",
+      "bytes": 7790
+    },
+    {
+      "path": "roomsd/src/federation/terminal-runtime-handler.ts",
+      "sha256": "d669300fd3a27e4aa4ef31fe6cb73399152db92521bc9ca6e125534eac283427",
+      "mode": "0644",
+      "bytes": 8949
+    },
+    {
+      "path": "roomsd/src/generated/rooms/v1/rooms.ts",
+      "sha256": "4fce722167c9b9490b1e225e7e2f4541e41343b628cf0f55cd99fc93c5718cd2",
+      "mode": "0644",
+      "bytes": 25892
+    },
+    {
+      "path": "roomsd/src/identity/authority.ts",
+      "sha256": "e6ad74793f10906e6e2ff10573d8203acf487a66e308063cdb9374908f3afd74",
+      "mode": "0644",
+      "bytes": 391
+    },
+    {
+      "path": "roomsd/src/identity/machine-identity.ts",
+      "sha256": "6569ecdcf106b5a632346d8ced8a6be8e58c049222a2704956a8b0848c5d040d",
+      "mode": "0644",
+      "bytes": 10587
+    },
+    {
+      "path": "roomsd/src/index.ts",
+      "sha256": "1132e8f8ca5b3502330a1a49e33263ac6cf1a434f7965054b4c611b6c64791ba",
+      "mode": "0644",
+      "bytes": 992
+    },
+    {
+      "path": "roomsd/src/lifecycle/archive-channel.ts",
+      "sha256": "3fa9517cab23b709786d549683bab80ba3cb61069b8a05290e09cd639dd98a8f",
+      "mode": "0644",
+      "bytes": 4018
+    },
+    {
+      "path": "roomsd/src/lifecycle/suspend-resume.ts",
+      "sha256": "ed5393bddd0e79b3e9e62108b274554d2c7093d503e208babc7fac47720e3621",
+      "mode": "0644",
+      "bytes": 23575
+    },
+    {
+      "path": "roomsd/src/mcp/server.ts",
+      "sha256": "61b4b696bec1265e854123ee970988a1893e105296d6fd581deac11bfdb5dc53",
+      "mode": "0644",
+      "bytes": 5687
+    },
+    {
+      "path": "roomsd/src/mcp/stdio.ts",
+      "sha256": "2331289ff30893625d08436e0e2d9dca3f9484d128d427f46a6a7d9c7ab49e2b",
+      "mode": "0644",
+      "bytes": 1205
+    },
+    {
+      "path": "roomsd/src/providers/capability-matrix.ts",
+      "sha256": "342fcef8a3f19fd09763931143549c5279fc49ca0da3e856bdfc40a5e95b789d",
+      "mode": "0644",
+      "bytes": 3899
+    },
+    {
+      "path": "roomsd/src/providers/model-catalog.ts",
+      "sha256": "8c3f8a28c53415979ba73da130edf54453d487b39fd202cd970038093ab77a6e",
+      "mode": "0644",
+      "bytes": 2124
+    },
+    {
+      "path": "roomsd/src/provisioning/doctor.ts",
+      "sha256": "c8f4f677df66aac01da22020cc485eeb5186732fb03c5c819ee4ba5b7123c8fe",
+      "mode": "0644",
+      "bytes": 9165
+    },
+    {
+      "path": "roomsd/src/provisioning/launchd.ts",
+      "sha256": "f0e9b0c2f23bc63fa87c9640c12a7e2f84a0afaf1630a649c1d4631a22b365ff",
+      "mode": "0644",
+      "bytes": 12313
+    },
+    {
+      "path": "roomsd/src/provisioning/lifecycle.ts",
+      "sha256": "18229955c5efa19be24325fefd9374e40a99de7f9e18d177b989bb50fb46054c",
+      "mode": "0644",
+      "bytes": 3439
+    },
+    {
+      "path": "roomsd/src/provisioning/local-state.ts",
+      "sha256": "2455384187f1f879d45ac14a990a84cfb48b64be74bb34004771cde5c33854d7",
+      "mode": "0644",
+      "bytes": 6588
+    },
+    {
+      "path": "roomsd/src/provisioning/paths.ts",
+      "sha256": "58a28fa12270c20e6bd25941ebaede5c42765e71b4f6d807ba9798b894ff5c92",
+      "mode": "0644",
+      "bytes": 4574
+    },
+    {
+      "path": "roomsd/src/provisioning/release.ts",
+      "sha256": "18798cd6b6126ee5cba85497afd5800957325932e5e07115bbabf47f4858566c",
+      "mode": "0644",
+      "bytes": 23702
+    },
+    {
+      "path": "roomsd/src/provisioning/version.ts",
+      "sha256": "77fdaeca144c8cabdf1e17cc75af412e524e01d672323a8d72bdadaa16ceafa4",
+      "mode": "0644",
+      "bytes": 1384
+    },
+    {
+      "path": "roomsd/src/rotation/contracts.ts",
+      "sha256": "0108dce0097a97c359972b6035b9db1f8114614837b8551371fbba494845a84d",
+      "mode": "0644",
+      "bytes": 2207
+    },
+    {
+      "path": "roomsd/src/rotation/repository.ts",
+      "sha256": "c3341777a321a861567b6aa63768e737561d90814780706c50cb01b6fd14c507",
+      "mode": "0644",
+      "bytes": 4166
+    },
+    {
+      "path": "roomsd/src/rotation/service.ts",
+      "sha256": "54c6650fae1aedbd5115a09366ffc96b718ffb415416a653b7849241b2541ce6",
+      "mode": "0644",
+      "bytes": 6899
+    },
+    {
+      "path": "roomsd/src/runtime/codex-adapter.ts",
+      "sha256": "ebf1d67477c1bb1f8695d11e82eb79dc614814188dbb6bc8469c0ad138dadf70",
+      "mode": "0644",
+      "bytes": 21994
+    },
+    {
+      "path": "roomsd/src/runtime/contracts.ts",
+      "sha256": "e232235c8591dc8a85b8fac63c7c817cea8a55c7787c668d84e1fb67844173a1",
+      "mode": "0644",
+      "bytes": 4882
+    },
+    {
+      "path": "roomsd/src/runtime/host/client.ts",
+      "sha256": "43b3c2f74857ebed5813f12290fbfb339bba44030003f03c6da6cb1e43d29329",
+      "mode": "0644",
+      "bytes": 7914
+    },
+    {
+      "path": "roomsd/src/runtime/host/codec.ts",
+      "sha256": "386c6143867a6f0259809dada2c351f8f2258246cf31e069b101a3d5a413050f",
+      "mode": "0644",
+      "bytes": 6021
+    },
+    {
+      "path": "roomsd/src/runtime/host/endpoint.ts",
+      "sha256": "46d9f095acaa970949fca0aeffdad27eb13589b4739e605d9ffd570a0c473d1c",
+      "mode": "0644",
+      "bytes": 1722
+    },
+    {
+      "path": "roomsd/src/runtime/host/supervisor.ts",
+      "sha256": "88f76ac106f07a08b4b9790dd9523dc0f333ec8c7b85804ec1e0198a2fbe44bb",
+      "mode": "0644",
+      "bytes": 10392
+    },
+    {
+      "path": "roomsd/src/runtime/native/composition.ts",
+      "sha256": "328274aaf1224a2a5217ae7a791e67f4bb10ee9db9cde167b60eea822927ee74",
+      "mode": "0644",
+      "bytes": 53928
+    },
+    {
+      "path": "roomsd/src/runtime/native/index.ts",
+      "sha256": "7dc80db09e69f572dc1485407ca0bafd21513bb43e88fa9072e75b9213e6231a",
+      "mode": "0644",
+      "bytes": 69
+    },
+    {
+      "path": "roomsd/src/runtime/native/local-channel-lifecycle.ts",
+      "sha256": "d30ef17245428ef5137020c7505d9cb947ed12a8a8b038ca9045c8a5455593d1",
+      "mode": "0644",
+      "bytes": 11388
+    },
+    {
+      "path": "roomsd/src/runtime/native/main.ts",
+      "sha256": "13de92933b0a19ac7b18cd67ff357944c93f74a85203ab5dd655614fd265689e",
+      "mode": "0644",
+      "bytes": 4345
+    },
+    {
+      "path": "roomsd/src/runtime/native/runtime.ts",
+      "sha256": "eb2442567ad597e56ccf57351c76b3f25e19185f26d7b37fefba33396ed76be4",
+      "mode": "0644",
+      "bytes": 2063
+    },
+    {
+      "path": "roomsd/src/runtime/native/standalone.ts",
+      "sha256": "5c55e96ad583a804d4048e8ec133e3f9ffeba07f6ec8b7ddb5b95a3c578ed23a",
+      "mode": "0644",
+      "bytes": 109
+    },
+    {
+      "path": "roomsd/src/runtime/provider-final-reply.ts",
+      "sha256": "78655d4246feb091f9b4966bd3b4699b1498b98b1aeca241a6422759e3fa1c7b",
+      "mode": "0644",
+      "bytes": 16627
+    },
+    {
+      "path": "roomsd/src/runtime/provider-managed-launch.ts",
+      "sha256": "9603f3fc8418a22f827fad3368226ea0c4b28bb86a3a3953a165dc415bbc5519",
+      "mode": "0644",
+      "bytes": 1315
+    },
+    {
+      "path": "roomsd/src/runtime/provider-reply-bridge.ts",
+      "sha256": "fd74c3cd5a72b58d78fc7de5a44142e22efbd856f6e047f2ec7c3d05e53bd22f",
+      "mode": "0644",
+      "bytes": 8793
+    },
+    {
+      "path": "roomsd/src/runtime/provider-turn.ts",
+      "sha256": "33dea39483df2b0cab58ebfaeb68614a0e9c961ecec844a7bbc1d7ebcb051d74",
+      "mode": "0644",
+      "bytes": 18817
+    },
+    {
+      "path": "roomsd/src/runtime/provider-usage.ts",
+      "sha256": "dabb7e655d889305e57d8e0e05c04375cce8f50a76ba47b38b4b80f24cce322e",
+      "mode": "0644",
+      "bytes": 3523
+    },
+    {
+      "path": "roomsd/src/runtime/service.ts",
+      "sha256": "3b7a15fe045c3e35f682bc33a2eab87d04dd10b3d0e6d03a428c823849b87afa",
+      "mode": "0644",
+      "bytes": 50117
+    },
+    {
+      "path": "roomsd/src/storage/blueprint-repository.ts",
+      "sha256": "2e97c02830dcf4dae698595c301f1c98cff5a1ac27c04af02e7c10bba477fe8b",
+      "mode": "0644",
+      "bytes": 22063
+    },
+    {
+      "path": "roomsd/src/storage/index.ts",
+      "sha256": "ec2c773ff4ec534c4580c68dc2e8e5d21f360acd5772dd05366182645b39787c",
+      "mode": "0644",
+      "bytes": 149
+    },
+    {
+      "path": "roomsd/src/storage/migrations.ts",
+      "sha256": "2da87111bfb118aeb12e46165cf6980302384c7060599199256ed8f72c126a78",
+      "mode": "0644",
+      "bytes": 20585
+    },
+    {
+      "path": "roomsd/src/storage/query-telemetry.ts",
+      "sha256": "8e37fef3db04d1226eccaa8e38f6bb13538f95e35d5ff72eea3fa7e6c343b363",
+      "mode": "0644",
+      "bytes": 6994
+    },
+    {
+      "path": "roomsd/src/storage/repository.ts",
+      "sha256": "fff2ed11e18c08b15ece5adb1f879ccc5f83f214c46586101ed2da3ea7f22fc8",
+      "mode": "0644",
+      "bytes": 71857
+    },
+    {
+      "path": "roomsd/src/storage/runtime-repository.ts",
+      "sha256": "e5d40f41a7b3a3cd3527a94814777e9ec9a5ccb4c0ddf9c885dd4bb3b7a4b748",
+      "mode": "0644",
+      "bytes": 26315
+    },
+    {
+      "path": "roomsd/src/storage/store-migration.ts",
+      "sha256": "bcbededd3faaa6fdc58055b807e06d555972921a72de5fd5c31f50f2596ad0ae",
+      "mode": "0644",
+      "bytes": 3459
+    },
+    {
+      "path": "roomsd/src/storage/usage-history.ts",
+      "sha256": "fa47e00c1ea3abc3b120254869cbfbc38e82cd3749bf8251d9dc08fa3a78ab3a",
+      "mode": "0644",
+      "bytes": 7718
+    },
+    {
+      "path": "roomsd/src/transports/named-pipe/index.ts",
+      "sha256": "643a736de27394db2497e6f45319ac8873c9b0e707abd8caca38d115c42d493f",
+      "mode": "0644",
+      "bytes": 183
+    },
+    {
+      "path": "roomsd/src/transports/tcp/index.ts",
+      "sha256": "643a736de27394db2497e6f45319ac8873c9b0e707abd8caca38d115c42d493f",
+      "mode": "0644",
+      "bytes": 183
+    },
+    {
+      "path": "roomsd/src/transports/unix/index.ts",
+      "sha256": "b7cdeee5b5223a74488f6ecaf0c63df35cf0114991c287ca91fa1d79d5c4351b",
+      "mode": "0644",
+      "bytes": 17963
+    },
+    {
+      "path": "roomsd/test/agent-briefing.test.ts",
+      "sha256": "a1dcd4e907812bad6456ec5ebf4b2828cd0f9838a30664845f72d8bd832c7710",
+      "mode": "0644",
+      "bytes": 1725
+    },
+    {
+      "path": "roomsd/test/agent-rotation.test.ts",
+      "sha256": "319570db1ae50ba7c9fc182d29bc0cf027158ac27d60df00c5753498ea351d38",
+      "mode": "0644",
+      "bytes": 11880
+    },
+    {
+      "path": "roomsd/test/auth-service.test.ts",
+      "sha256": "5729841746db530ae3dc02ee067106c690420da024e276d9b61b516c937feba2",
+      "mode": "0644",
+      "bytes": 3976
+    },
+    {
+      "path": "roomsd/test/blueprint-repository.test.ts",
+      "sha256": "ee086bb1ddfc9c37f978973adefd0d2486cb34e172c19f49827a820b467d4cd2",
+      "mode": "0644",
+      "bytes": 20907
+    },
+    {
+      "path": "roomsd/test/channel-archive-lifecycle.test.ts",
+      "sha256": "51256e1ae38d1aa27f849ca05456745e6055b78cdc8268c2b4d02cd55bb5b98f",
+      "mode": "0644",
+      "bytes": 4885
+    },
+    {
+      "path": "roomsd/test/channel-create-goal.test.ts",
+      "sha256": "c423c0f520c8726368d514d052e4f131bfa9549a9f29414eab6437ce4e1bd130",
+      "mode": "0644",
+      "bytes": 2856
+    },
+    {
+      "path": "roomsd/test/channel-result.test.ts",
+      "sha256": "1be47fd1b0ceb709057d3eaeb7b2419b993ade8c3eebae99a288d55c21ff9b03",
+      "mode": "0644",
+      "bytes": 13119
+    },
+    {
+      "path": "roomsd/test/channel-route-store.test.ts",
+      "sha256": "2acde7bb4f6cf52d0b8f6adb02f47b0ee454d2a30522f3b7eec7a0dbe2fd1327",
+      "mode": "0644",
+      "bytes": 2101
+    },
+    {
+      "path": "roomsd/test/channel-state-snapshot.test.ts",
+      "sha256": "198555614eb6e0b7ede770e18ac3406556d53a622828fe5b40de56d5a592f528",
+      "mode": "0644",
+      "bytes": 9758
+    },
+    {
+      "path": "roomsd/test/channel-subscription-manager.test.ts",
+      "sha256": "b97ba8cbc27835b85838eaecd20fb7c6a80d0a75510aea70c6084f332e9cfa2a",
+      "mode": "0644",
+      "bytes": 5344
+    },
+    {
+      "path": "roomsd/test/cli-agent-coordination.test.ts",
+      "sha256": "1dc4c161abac0fea37e306f406e732c8da403b042de048d986d4b812a070e737",
+      "mode": "0644",
+      "bytes": 17102
+    },
+    {
+      "path": "roomsd/test/cli-channel-close.test.ts",
+      "sha256": "b8091e898c039b2e66ceff9e731da410c2a915c856ceddd9195cdacf7a744aee",
+      "mode": "0644",
+      "bytes": 9414
+    },
+    {
+      "path": "roomsd/test/cli-channel-list.test.ts",
+      "sha256": "a7029ccf7858cb0d0c992c1fee9763eea60f4fbcf699c43b0a7ff4d8dfa7313e",
+      "mode": "0644",
+      "bytes": 4904
+    },
+    {
+      "path": "roomsd/test/cli-lifecycle.test.ts",
+      "sha256": "926320c018efc2857849fc8ecd000ac81b5cb3d9a29deabe29996ff157f6fb85",
+      "mode": "0644",
+      "bytes": 2268
+    },
+    {
+      "path": "roomsd/test/cli-message-list.test.ts",
+      "sha256": "bba67cf0b950a5dd38cd3ce26c8a26d6c2935c8dc6cd31b6f05418230455b4a5",
+      "mode": "0644",
+      "bytes": 13671
+    },
+    {
+      "path": "roomsd/test/cli-run-provider-flags.test.ts",
+      "sha256": "f3be2f45bc98dd5c4302e94cbfda2c85c9551d07835dba786ed27a123f20a9ca",
+      "mode": "0644",
+      "bytes": 3332
+    },
+    {
+      "path": "roomsd/test/cli-runtime-quota.test.ts",
+      "sha256": "6963d35ea67dd02cc384c43fb852f063ad82d0ba7982ea7bde5297ff503e46dd",
+      "mode": "0644",
+      "bytes": 4060
+    },
+    {
+      "path": "roomsd/test/cli-session-inspect.test.ts",
+      "sha256": "6651b3265774bc54031a6f37374e37b0a48bde24b40c75dd841290c6f7c170e7",
+      "mode": "0644",
+      "bytes": 11940
+    },
+    {
+      "path": "roomsd/test/cli-thread-lifecycle.test.ts",
+      "sha256": "1d773aa75a97e3ed4bee60dfeaacc0073bd36c613eabb33ef1a8667e1a4522ae",
+      "mode": "0644",
+      "bytes": 1932
+    },
+    {
+      "path": "roomsd/test/codex-adapter-fence.test.ts",
+      "sha256": "ad549239bdb079a8c841f70c662f9c0a59a62f5e1502323c35578fcb7db95645",
+      "mode": "0644",
+      "bytes": 4675
+    },
+    {
+      "path": "roomsd/test/codex-minimal-profile.test.ts",
+      "sha256": "3461ccfc48504903e1b0a74e1f012b41a2d9452b495138c55dc0d5407795f728",
+      "mode": "0644",
+      "bytes": 1323
+    },
+    {
+      "path": "roomsd/test/codex-session-import.test.ts",
+      "sha256": "ebd27b13d3f84a8d5f1018d85e6bce3d210f3c592ab1684ed9d24144e0d973d2",
+      "mode": "0644",
+      "bytes": 2504
+    },
+    {
+      "path": "roomsd/test/docker-adapter.test.ts",
+      "sha256": "805097c1b39c3c1718a557a302480b507a0a17c9cbf706f5d3fc9c01fe151733",
+      "mode": "0644",
+      "bytes": 1744
+    },
+    {
+      "path": "roomsd/test/federation-channel-admission.test.ts",
+      "sha256": "5da2bbbf6df38e0e5057b9670240f5ee98fe02faa7dbb2166972d2be2044fb8b",
+      "mode": "0644",
+      "bytes": 5427
+    },
+    {
+      "path": "roomsd/test/federation-enrollment.test.ts",
+      "sha256": "7fdbe6be084fb1bda1548eca8967359fdc54968be40088b385592fbe32f41161",
+      "mode": "0644",
+      "bytes": 6942
+    },
+    {
+      "path": "roomsd/test/federation-relay.test.ts",
+      "sha256": "b8fdee145441623cd529131216bad5c141ce5af64ad319599593cb179a1cdf1e",
+      "mode": "0644",
+      "bytes": 12507
+    },
+    {
+      "path": "roomsd/test/federation-terminal-capability.test.ts",
+      "sha256": "e2b8749d0621492a9ebd008c1914e9fd4af0ae0b9d827f347d5b50b54e012aaf",
+      "mode": "0644",
+      "bytes": 13950
+    },
+    {
+      "path": "roomsd/test/get-events-contract.test.ts",
+      "sha256": "af8e55204970ebe8a6c8dd2c9f23772443e68453cb391ec513467fbb0d0347d1",
+      "mode": "0644",
+      "bytes": 4819
+    },
+    {
+      "path": "roomsd/test/handler.test.ts",
+      "sha256": "52b28be79a09ce587fa05c156eb4dda899295c767e5105a07cb51f2f8fa5fbd7",
+      "mode": "0644",
+      "bytes": 1369
+    },
+    {
+      "path": "roomsd/test/isolate-state-dir.ts",
+      "sha256": "bb130d1aeaef472881fca9e80542afc8ca70e90ad1aae93f1cd336c84c0f2fb9",
+      "mode": "0644",
+      "bytes": 759
+    },
+    {
+      "path": "roomsd/test/launch-permissions.test.ts",
+      "sha256": "cdb8008015d94839e61ff9c68e07e875b622b8de5b57366eec92dde099a5c731",
+      "mode": "0644",
+      "bytes": 2054
+    },
+    {
+      "path": "roomsd/test/license-policy.test.ts",
+      "sha256": "033d836bd9f527a536bf7a8d9d2d68472b70e150a7a158de098ed82c60f26819",
+      "mode": "0644",
+      "bytes": 2569
+    },
+    {
+      "path": "roomsd/test/lifecycle.test.ts",
+      "sha256": "ca75cbabb9e0a03e0617a6e6c295f5e2b0310f09891e69b76e51fa92c7eaf0a2",
+      "mode": "0644",
+      "bytes": 30321
+    },
+    {
+      "path": "roomsd/test/local-service-contract.test.ts",
+      "sha256": "1d11a06112186d4a97673dfa0edc7d76f2339e5180fc39b7f0f87fbea05f60f4",
+      "mode": "0644",
+      "bytes": 7409
+    },
+    {
+      "path": "roomsd/test/machine-inventory-cli.test.ts",
+      "sha256": "c678a98913fda8ae6f3a4fef6da83f896522d91626f87d18e8ed29a94293e6d6",
+      "mode": "0644",
+      "bytes": 2603
+    },
+    {
+      "path": "roomsd/test/machine-inventory-protocol.test.ts",
+      "sha256": "34372fd18f000026d573d8752c7c45fa827e1da379575bca8c82227b173f96e9",
+      "mode": "0644",
+      "bytes": 1129
+    },
+    {
+      "path": "roomsd/test/machine-route-store.test.ts",
+      "sha256": "cfaa0b3a5f96e2faf124a3e98c2d7ab6efdca9ccc1ab4e969107de06059e118a",
+      "mode": "0644",
+      "bytes": 1861
+    },
+    {
+      "path": "roomsd/test/mcp-server.test.ts",
+      "sha256": "b3c91333c610db1c629bbe70783f508825e79a51eb061c76de6b426dffc9e9f7",
+      "mode": "0644",
+      "bytes": 4193
+    },
+    {
+      "path": "roomsd/test/message-provenance.test.ts",
+      "sha256": "675a83c1a288b97f8331931929e108d593311929177f2a52730288773f03410b",
+      "mode": "0644",
+      "bytes": 991
+    },
+    {
+      "path": "roomsd/test/planner-runtime-launch.test.ts",
+      "sha256": "6455c8dd18b551b0ee592b3d8ea71f5328bf69d808ffe5c695faa3080a8945dc",
+      "mode": "0644",
+      "bytes": 10647
+    },
+    {
+      "path": "roomsd/test/proto-contract.test.ts",
+      "sha256": "14aabbe8b5a58d7ee103e76af6406a0f5fa2d5488d577a0ee43b185a019b34f0",
+      "mode": "0644",
+      "bytes": 7005
+    },
+    {
+      "path": "roomsd/test/protocol-spec.test.ts",
+      "sha256": "d302d8326fc4aa50de2b30e0368a5c9b32919043a121b998e12e3713de717410",
+      "mode": "0644",
+      "bytes": 3051
+    },
+    {
+      "path": "roomsd/test/provider-capability-matrix.test.ts",
+      "sha256": "154e9296236874f46632495e4683423fbc56c7438ec2ca9fd21b46e8da779321",
+      "mode": "0644",
+      "bytes": 3130
+    },
+    {
+      "path": "roomsd/test/provider-conversation-drivers.test.ts",
+      "sha256": "b5690b1dbe022f183b75c361f75f7506c3b69d4b2830f1f408a6511c47a1b7bd",
+      "mode": "0644",
+      "bytes": 4871
+    },
+    {
+      "path": "roomsd/test/provider-final-reply.test.ts",
+      "sha256": "b93b53f8e916d6cb3ea7fde41bf0902a71f089d9bbd0cf615e9699d677ee92ee",
+      "mode": "0644",
+      "bytes": 10127
+    },
+    {
+      "path": "roomsd/test/provider-identity-discovery.test.ts",
+      "sha256": "608caf5b0ca3f06bd98a1d07568ea875fab874617ef5b96eb5142f336a8e3c43",
+      "mode": "0644",
+      "bytes": 18243
+    },
+    {
+      "path": "roomsd/test/provider-launch-options.test.ts",
+      "sha256": "31305e9d37a8a268f292ca16fcd7ebf73ab85322af2853891b7c2f7c49e4b9ec",
+      "mode": "0644",
+      "bytes": 1831
+    },
+    {
+      "path": "roomsd/test/provider-managed-launch.test.ts",
+      "sha256": "b5a750e221a169e8f7bef390a6f0c08ce3ade59ffbf5e9afacec12c841fd1fde",
+      "mode": "0644",
+      "bytes": 1434
+    },
+    {
+      "path": "roomsd/test/provider-model-catalog.test.ts",
+      "sha256": "4839643b4d66a69fbbab0715c6ec608ccac91f7f9e720806bbb7ec65dd673db0",
+      "mode": "0644",
+      "bytes": 1760
+    },
+    {
+      "path": "roomsd/test/provider-registry.test.ts",
+      "sha256": "9285d021fe7ecb716c58f9cda92fad82471d368d90bb2e521b10e21887e272b7",
+      "mode": "0644",
+      "bytes": 5674
+    },
+    {
+      "path": "roomsd/test/provider-reply-bridge.test.ts",
+      "sha256": "28b5e4c520bdc319da0f5db8a9fa9bfde3081198402cf2c6e3979a2d6e916dd6",
+      "mode": "0644",
+      "bytes": 12352
+    },
+    {
+      "path": "roomsd/test/provider-run.test.ts",
+      "sha256": "f803ca2596f64ff7ad32fb515ab0c91a62b72f12b1d34351dca229d2ebb40cd4",
+      "mode": "0644",
+      "bytes": 548
+    },
+    {
+      "path": "roomsd/test/provider-submission.test.ts",
+      "sha256": "b5a551f63dc2018ce2412ad9bb8909d1140152f6cc5129a37c25be34a270eac4",
+      "mode": "0644",
+      "bytes": 1158
+    },
+    {
+      "path": "roomsd/test/provider-turn-inspect.live.test.ts",
+      "sha256": "4f1c7a4453011335d3ffbebf48dc6c08a4e0628fb1647e5b621ee87ba97b422f",
+      "mode": "0644",
+      "bytes": 11963
+    },
+    {
+      "path": "roomsd/test/provider-turn.test.ts",
+      "sha256": "e4be8a1ad6e3674eabd320b39587bbdc0050f94d7f802d6afb56d909fd84a2ce",
+      "mode": "0644",
+      "bytes": 8969
+    },
+    {
+      "path": "roomsd/test/provider-usage.test.ts",
+      "sha256": "5854627349e583afee9251fedad0737d7c3e7660a04c485a946d5120a05a5f50",
+      "mode": "0644",
+      "bytes": 3437
+    },
+    {
+      "path": "roomsd/test/public-ci.test.ts",
+      "sha256": "4d63fb0d498aecb8d319dd10cd0916100d01acfde1d4d2ddc5d93c9683f970f1",
+      "mode": "0644",
+      "bytes": 2171
+    },
+    {
+      "path": "roomsd/test/public-community-files.test.ts",
+      "sha256": "2a34ec764faa48f8d882248e2c115969698a5b3df760d9cc16d7f81d3e75c979",
+      "mode": "0644",
+      "bytes": 3705
+    },
+    {
+      "path": "roomsd/test/public-readme.test.ts",
+      "sha256": "14a655f26ea7e57c1ed6e733535961950940a32cde4cde46e8f58e118ac3fd2c",
+      "mode": "0644",
+      "bytes": 2784
+    },
+    {
+      "path": "roomsd/test/reasoning-effort.test.ts",
+      "sha256": "5367c2073564ae42415d78f88d645933cd048beb3ce3ee4d33c7de3ca7d0be91",
+      "mode": "0644",
+      "bytes": 4065
+    },
+    {
+      "path": "roomsd/test/relay-admission.test.ts",
+      "sha256": "1211c1091762adfd0357543825161aa76a3166d727c5ffd78ef3cf27be668db4",
+      "mode": "0644",
+      "bytes": 3503
+    },
+    {
+      "path": "roomsd/test/release-code-identity.test.ts",
+      "sha256": "f86a725de777065de9a4bd121b4b1e438f59641de66bda0799375f0cdb56126f",
+      "mode": "0644",
+      "bytes": 6539
+    },
+    {
+      "path": "roomsd/test/release-contract.test.ts",
+      "sha256": "5c0be9a33d858d9998e6b5ca8e9ec33dba73e1170063f51170295bb3b4c0b183",
+      "mode": "0644",
+      "bytes": 675
+    },
+    {
+      "path": "roomsd/test/release-pruning.test.ts",
+      "sha256": "d4d4e3549d31cc8aad8302af231557ebc98eebbdfe1c0d492e2e4fc5f0356080",
+      "mode": "0644",
+      "bytes": 2525
+    },
+    {
+      "path": "roomsd/test/release-schema-upgrade.test.ts",
+      "sha256": "c48416070ef64bcae0eadbfad38a658aafda75f6284123bcab2b4d1289c1ad3b",
+      "mode": "0644",
+      "bytes": 5189
+    },
+    {
+      "path": "roomsd/test/runtime-attach-exit.test.ts",
+      "sha256": "d2889c19050692a5320ed5f7f8f35e243a33ae7a02ec7df076c0ac3c6dd56d4a",
+      "mode": "0644",
+      "bytes": 5384
+    },
+    {
+      "path": "roomsd/test/runtime-capability-renewal.test.ts",
+      "sha256": "e77e5027e70e87dea7e3f137872322d883aa34734c03a18db806777f9d98b1bc",
+      "mode": "0644",
+      "bytes": 499
+    },
+    {
+      "path": "roomsd/test/runtime-drain.test.ts",
+      "sha256": "34206efe9d3d362528de26dccf8ba42640f85495ac15b00f043dbab2f4951166",
+      "mode": "0644",
+      "bytes": 4407
+    },
+    {
+      "path": "roomsd/test/runtime-federated-delivery-audit.test.ts",
+      "sha256": "adf3e24d47e9f0111e5d890a9dfa77322c6fa1fb6a8161e1e225614edd74d2b0",
+      "mode": "0644",
+      "bytes": 768
+    },
+    {
+      "path": "roomsd/test/runtime-provider-identity.test.ts",
+      "sha256": "4da4491ba2efec9cf45c929f9c6d3b963135b42db0a50069b1082e2395138735",
+      "mode": "0644",
+      "bytes": 6127
+    },
+    {
+      "path": "roomsd/test/runtime/host-platform.test.ts",
+      "sha256": "eb7de21baec1c688508297759a8fd398a98082ce4c238766db33b97edeaaa131",
+      "mode": "0644",
+      "bytes": 532
+    },
+    {
+      "path": "roomsd/test/runtime/native-runtime.test.ts",
+      "sha256": "de6e710368c7b6079e02bffc74116234f27fefd7b18c8c79ed27ff4b1ea9b8c8",
+      "mode": "0644",
+      "bytes": 30249
+    },
+    {
+      "path": "roomsd/test/schema-safety.test.ts",
+      "sha256": "942bc31fa1368aa509db204297b4203f18b3cc070f6ec1ea8895cd8c3686e322",
+      "mode": "0644",
+      "bytes": 11573
+    },
+    {
+      "path": "roomsd/test/service-isolation.test.ts",
+      "sha256": "d66936a85eafe835ab0f4a52887f233b3c98e683e45389d3c58feb5b44b07ad0",
+      "mode": "0644",
+      "bytes": 8682
+    },
+    {
+      "path": "roomsd/test/service-launch-path.test.ts",
+      "sha256": "255b03b5433238e573a59d2930c43a71756079ae6acd694802c4151304e4eae4",
+      "mode": "0644",
+      "bytes": 3780
+    },
+    {
+      "path": "roomsd/test/setup.test.ts",
+      "sha256": "aa7edf487adbee4ee86ba515bb7e74af69ffe2e31b43b42cb5eaad7fb6f07c42",
+      "mode": "0644",
+      "bytes": 1011
+    },
+    {
+      "path": "roomsd/test/shellenv.test.ts",
+      "sha256": "a10e3ae7c926cf0690142bcf73456b8628da1970ffe20d848bca77f5349174ab",
+      "mode": "0644",
+      "bytes": 2482
+    },
+    {
+      "path": "roomsd/test/skills.test.ts",
+      "sha256": "608ccf88315eae7d6575bc76047f44e6296e0425096502bf7afe3c0902e05eb5",
+      "mode": "0644",
+      "bytes": 6905
+    },
+    {
+      "path": "roomsd/test/sqlite-repository.test.ts",
+      "sha256": "b9a43534555992ba83b09a6d877bd62c8fd74f6ebe3713fe47edf5a3a8bac665",
+      "mode": "0644",
+      "bytes": 15566
+    },
+    {
+      "path": "roomsd/test/state-dir-isolation.test.ts",
+      "sha256": "2d2c9c2bc9d451868b9a55b338b2de1f6f396abfbe825768867fdd4047634bc3",
+      "mode": "0644",
+      "bytes": 1073
+    },
+    {
+      "path": "roomsd/test/subscriptions.test.ts",
+      "sha256": "b0bb8430a0276b3b76d0e7e18da8e878b3fd7a120854f9a935dac289171e1b5c",
+      "mode": "0644",
+      "bytes": 2613
+    },
+    {
+      "path": "roomsd/test/thread-lifecycle.test.ts",
+      "sha256": "f10c5601a1cca7a1c87b7831a47a22f1b6718040355ccab4a1d006f7c205eacc",
+      "mode": "0644",
+      "bytes": 2881
+    },
+    {
+      "path": "roomsd/test/transports.test.ts",
+      "sha256": "d2bc05bff48baa2336e353b13d6131d98216185f06be877e720c8ad7d1f1bdca",
+      "mode": "0644",
+      "bytes": 8883
+    },
+    {
+      "path": "roomsd/test/usage-history.test.ts",
+      "sha256": "982c683d6ff8e85f6cbe9979f6096d822d63def017e30d0ad0abe585c9a9334f",
+      "mode": "0644",
+      "bytes": 12199
+    },
+    {
+      "path": "roomsd/test/version-reporting.test.ts",
+      "sha256": "1cb3f1aa27aa3bffae49415ffa9bdaee1fe2e7cfddd259d174b061d7f7bcecae",
+      "mode": "0644",
+      "bytes": 2144
+    },
+    {
+      "path": "roomsd/tsconfig.json",
+      "sha256": "c40e096f3e072be5e70966bde87348fc6b932c18add51c9022d23ef6cf9ff4d3",
+      "mode": "0644",
+      "bytes": 331
+    },
+    {
+      "path": "roomsd/vitest.config.ts",
+      "sha256": "7f0b660de744b839800a784837d827f93f776341655eeb4f0f1535aaf18b9393",
+      "mode": "0644",
+      "bytes": 314
+    }
+  ]
+}

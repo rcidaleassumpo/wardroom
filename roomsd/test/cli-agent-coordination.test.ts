@@ -199,7 +199,7 @@ describe("Rooms agent coordination commands", () => {
     expect(launches).toEqual([{
       agent: "gemini",
       adapter: "agy",
-      command: ["/tmp/isolated-provider-registry/agy", "--model", "gemini-test", "--approval-mode", "yolo"],
+      command: ["/tmp/isolated-provider-registry/agy", "--model", "gemini-test", "--dangerously-skip-permissions"],
     }]);
   });
 

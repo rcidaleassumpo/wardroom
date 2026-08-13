@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { runRoomsCLI } from "./main.js";
 
 runRoomsCLI(process.argv.slice(2)).then((output) => process.stdout.write(output)).catch((error) => {

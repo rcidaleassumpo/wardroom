@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import type { RoomsRepository } from "../storage/repository.js";
 
 export type ChannelArchiveInput = Readonly<{ channelId: string; force: boolean }>;

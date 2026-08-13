@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync } from 
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { launchAgentPlist, serviceTarget, waitForServiceReady } from "../src/provisioning/launchd.js";
+import { launchAgentPlist, retireLegacyLaunchAgents, serviceTarget, waitForServiceReady } from "../src/provisioning/launchd.js";
 import { DEFAULT_ROOMS_SERVICE_LABEL, defaultStateDir, roomsPaths } from "../src/provisioning/paths.js";
 
 describe("Rooms per-state LaunchAgent identity", () => {
@@ -124,6 +124,43 @@ describe("service install readiness wiring", () => {
     expect(body).toContain("bootstrapService(");
     expect(body).toContain("waitForServiceReady(paths)");
     expect(body.indexOf("bootstrapService(")).toBeLessThan(body.indexOf("waitForServiceReady(paths)"));
+  });
+
+  it("retires exact pre-cutover jobs before replacing the canonical service", () => {
+    const calls: string[][] = [];
+    const removed: string[] = [];
+    const result = retireLegacyLaunchAgents({
+      domain: "gui/501",
+      launchAgentDir: "/tmp/LaunchAgents",
+      stateDir: "/tmp/rooms-state",
+      runLaunchctl: (args) => {
+        calls.push([...args]);
+        return { ok: true, output: "", error: "" };
+      },
+      removeFile: (path) => { removed.push(path); },
+    });
+
+    expect(calls).toEqual([
+      ["print", "gui/501/local.rooms.roomsd-ts"],
+      ["bootout", "gui/501/local.rooms.roomsd-ts"],
+      ["print", "gui/501/local.rooms.planner-supervisor"],
+      ["bootout", "gui/501/local.rooms.planner-supervisor"],
+    ]);
+    expect(result.labels).toEqual(["local.rooms.roomsd-ts", "local.rooms.planner-supervisor"]);
+    expect(removed).toEqual([
+      "/tmp/LaunchAgents/local.rooms.roomsd-ts.plist",
+      "/tmp/LaunchAgents/local.rooms.planner-supervisor.plist",
+      "/tmp/rooms-state/roomsd-ts.stdout.log",
+      "/tmp/rooms-state/roomsd-ts.stderr.log",
+      "/tmp/rooms-state/planner-supervisor.stdout.log",
+      "/tmp/rooms-state/planner-supervisor.stderr.log",
+    ]);
+    expect(removed).not.toContain("/tmp/LaunchAgents/local.rooms.roomsd.plist");
+
+    const install = source.slice(source.indexOf("export function installService"));
+    const body = install.slice(0, install.indexOf("\nexport function "));
+    expect(body).toContain("retireLegacyLaunchAgents()");
+    expect(body.indexOf("retireLegacyLaunchAgents()")).toBeLessThan(body.indexOf("bootstrapService("));
   });
 
   it("keeps the readiness failure loud rather than returning optimistically", () => {

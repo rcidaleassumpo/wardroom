@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { startNativeRooms } from "../../src/runtime/native/runtime.js";
 import { createNativeComposition } from "../../src/runtime/native/composition.js";
 import { setupMachineIdentity } from "../../src/identity/machine-identity.js";
+import { RuntimeRepository } from "../../src/storage/runtime-repository.js";
 
 const options = { endpoint: { kind: "unix" as const, path: "rooms.sock" }, databasePath: "/tmp/rooms.db", installSignalHandlers: false };
 
@@ -76,6 +77,36 @@ describe("native Rooms runtime", () => {
 
       expect(composition.database.currentSession("worker")?.endedAt).not.toBeNull();
       expect(composition.database.currentChannel("proof")?.lifecycleState).toBe("closed");
+      composition.database.close();
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves the host-recorded remote cwd through authenticated session inspection", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-cwd-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "operator", role: "operator" });
+      composition.database.insertSession({ id: "remote-worker", role: "worker" });
+      const runtimes = new RuntimeRepository(composition.database.db);
+      runtimes.create({
+        runtimeId: "remote-runtime", homeAuthorityId: "remote-authority", sessionId: "remote-worker",
+        generation: 7, protocolVersion: 4, transportKind: "localPty", machineId: "remote-machine",
+        effectiveCwd: "/Volumes/remote-source/project", reconnectSecret: new Uint8Array(32).fill(7),
+      });
+      runtimes.markState("remote-runtime", 7, "running");
+      runtimes.bind({
+        bindingId: "remote-binding", runtimeId: "remote-runtime", homeAuthorityId: "remote-authority",
+        sessionId: "remote-worker", generation: 7, adapterKind: "codex", handleRef: "unix:///remote/runtime.sock",
+        launchPolicyRef: JSON.stringify({ cwd: "/local/inference/must-not-win" }),
+      });
+      const connection = { authenticatedSessionId: "operator", credentials: new Map([["credential", "operator"]]), onClose: new Set() };
+
+      await expect(composition.handler.inspectSession({ sessionId: "remote-worker", context: { credential: "credential" }, __connection: connection } as never)).resolves.toMatchObject({
+        runtime: { runtimeId: "remote-runtime", generation: 7, machineId: "remote-machine", cwd: "/Volumes/remote-source/project", cwdState: "available", cwdReason: null },
+      });
       composition.database.close();
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
