@@ -18,7 +18,7 @@ export interface RoomsListener {
   close(): Promise<void>;
 }
 
-export interface RoomsConnectionState { authenticatedSessionId?: string; authenticatedCredential?: string; credentials: Map<string, string>; onClose: Set<() => void>; }
+export interface RoomsConnectionState { authenticatedSessionId?: string; authenticatedCredential?: string; credentials: Map<string, string>; bootstrapCredentials?: Map<string, string>; onClose: Set<() => void>; }
 const legacyCredentials = new Map<string, string>();
 
 /** Binds one API-owned typed handler to Unix, named-pipe, or TCP endpoint. */
@@ -65,7 +65,7 @@ export function connectRoomsService(endpoint: RoomsEndpoint): Promise<Socket> {
 }
 
 function serveConnection(socket: Socket, handler: RoomsServiceHandler): void {
-  const connection: RoomsConnectionState = { credentials: new Map(), onClose: new Set() };
+  const connection: RoomsConnectionState = { credentials: new Map(), bootstrapCredentials: new Map(), onClose: new Set() };
   let buffer = "";
   let legacyQueue = Promise.resolve();
   // Clients may disconnect while an asynchronous handler is producing its
@@ -187,7 +187,7 @@ async function serveLegacyConnection(socket: Socket, handler: RoomsServiceHandle
       const result = await handler.getEvents({ afterCursor: "0" } as never) as any;
       send({ ok: true, cursor: result.cursor });
     } else if (kind === "issueCredential") {
-      const result = await handler.issueCredential({ sessionId: String(request.sessionID ?? request.sessionId ?? ""), __connection: connection } as never) as any;
+      const result = await handler.issueCredential({ sessionId: String(request.sessionID ?? request.sessionId ?? ""), proof: String(request.proof ?? ""), __connection: connection } as never) as any;
       if (result.credential) legacyCredentials.set(result.credential, String(request.sessionID ?? request.sessionId ?? ""));
       send({ ok: true, credential: result.credential });
     } else if (kind === "authenticate") {
@@ -225,8 +225,8 @@ async function serveLegacyConnection(socket: Socket, handler: RoomsServiceHandle
       const result = await handler.channelStateSnapshots({ channelIds: channelIDs });
       send({ ok: true, ...result });
     } else if (kind === "search") {
-      const result = await handler.search({ channelId: channelID, query: request.query, scope: channelID ? "channel" : "all", limit: request.limit ?? 50 } as never) as any;
-      send({ ok: true, events: result.events ?? [] });
+      const result = await handler.search({ channelId: channelID, query: request.query, scope: channelID ? "channel" : "all", limit: request.limit ?? 50, includeControl: request.includeControl, includeChannelDigests: request.includeChannelDigests, activeOnly: request.activeOnly } as never) as any;
+      send({ ok: true, events: result.events ?? [], channels: result.channels ?? [] });
     } else if (kind === "recipients") {
       const result = await handler.getRecipients({ eventId: request.eventID ?? request.eventId } as never) as any;
       send({ ok: true, recipients: result.recipients ?? [] });

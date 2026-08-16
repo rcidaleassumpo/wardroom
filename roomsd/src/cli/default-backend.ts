@@ -3,7 +3,7 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import type { RoomsCLIBackend, ArchiveChannelInput, ChannelCreateInput, CommitMessageInput, ListMessagesInput, ListRepliesInput, SendPromptInput, SessionCreateInput, SessionRegisterInput, SessionListInput, ShowMessageInput, ThreadLifecycleInput, RuntimeCLIInput, RuntimeAttachCLIInput, RuntimeAttachInteractiveHandlers, RuntimeInputCLIInput, RuntimeResizeCLIInput, RuntimeSignalCLIInput, RuntimeTerminateCLIInput, RuntimeRecoverCLIInput, RuntimeDeliverCLIInput } from "./backend.js";
+import type { RoomsCLIBackend, ArchiveChannelInput, ChannelCreateInput, CommitMessageInput, LeadBroadcastInput, ListMessagesInput, ListRepliesInput, SearchInput, SendPromptInput, SessionCreateInput, SessionRegisterInput, SessionListInput, ShowMessageInput, ThreadLifecycleInput, RuntimeCLIInput, RuntimeAttachCLIInput, RuntimeAttachInteractiveHandlers, RuntimeInputCLIInput, RuntimeResizeCLIInput, RuntimeSignalCLIInput, RuntimeTerminateCLIInput, RuntimeRecoverCLIInput, RuntimeDeliverCLIInput } from "./backend.js";
 import { RoomsRepository } from "../storage/repository.js";
 import { storeSchemaVersion } from "../storage/migrations.js";
 import { SQLiteBlueprintStore, SQLiteRuntimeOwnershipStore } from "../storage/blueprint-repository.js";
@@ -21,6 +21,7 @@ import { stampRoomsProvenance } from "../domain/message-provenance.js";
 import { requireFederationModule } from "../federation-loader.js";
 import type { AuthorityId } from "../identity/authority.js";
 import { registeredProviderExecutable } from "./provider-registry.js";
+import { sessionLaunchProvenance } from "../domain/session-provenance.js";
 
 const isoNow = () => new Date().toISOString();
 
@@ -40,7 +41,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       provider.name === "codex" || provider.name === "claude" || provider.name === "grok");
   const legacyDrainOnlyAdapters = createCodexAdapters(blueprintStore, { runtimeOwnership: ownership, providerRegistrations });
   const canonical = new SQLiteCanonicalMembers(repository);
-  const daemonRuntime = new RoomsDaemonRuntimeClient(paths.endpoint, () => daemonUnavailableReason(paths, storePath));
+  const daemonRuntime = new RoomsDaemonRuntimeClient(paths.endpoint, () => daemonUnavailableReason(paths, storePath), paths.stateDir);
   const lifecycleRuntime: RuntimeGenerationPort = {
     activeGenerations(input) {
       if (input.length === 0) return new Set<string>();
@@ -60,6 +61,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
         adapterKind: input.adapterKind,
         providerThreadId: member?.provider?.conversationId ?? null,
         cwd: input.launch.cwd,
+        effectiveHome: input.launch.home ?? member?.launch.home ?? null,
         command: [input.launch.executable, ...input.launch.args],
       }) as { runtime?: { runtimeId?: string; sessionId?: string; providerThreadId?: string | null } };
       const runtime = launched.runtime;
@@ -147,6 +149,16 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
     async channelSend(input) {
       const sender = input.sender || currentRoomsSession(repository);
       return daemonRuntime.callAs(sender, "send", { channelId: input.channel, senderSessionId: sender, body: stampRoomsProvenance(sender, input.body), target: { kind: "broadcast", sessionIds: [] }, replyToEventId: input.replyToEventId });
+    },
+
+    async leadBroadcast(input: LeadBroadcastInput) {
+      const actor = runtimeActor(repository, input.credential);
+      return daemonRuntime.callAs(actor.sessionId, "leadBroadcast", {
+        idempotencyKey: input.idempotencyKey,
+        body: input.body,
+        channelIds: input.channelIds,
+        attachmentReferences: input.attachmentReferences ?? [],
+      });
     },
 
     async commitControl(input) {
@@ -274,7 +286,15 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       if (actor.role !== "operator" && !(actor.role === "planner" && role === "worker" && repository.isActiveMember(input.channel, actor.sessionId, "planner"))) {
         throw new Error("session launch requires an operator or the channel's active planner launching a worker");
       }
-      await daemonRuntime.call("registerSession", { channelId: input.channel, sessionId: input.name, role });
+      const actorSession = repository.currentSession(actor.sessionId);
+      const { externalOwner, externalAgentId } = sessionLaunchProvenance({
+        actorRole: actor.role,
+        actorExternalOwner: actorSession?.externalOwner ?? null,
+        targetSessionId: input.name,
+        externalOwner: input.externalOwner,
+        externalAgentId: input.externalAgentId,
+      });
+      await daemonRuntime.call("registerSession", { channelId: input.channel, sessionId: input.name, role, externalOwner, externalAgentId });
       let launched: unknown;
       try {
         launched = await daemonRuntime.callAs(actor.sessionId, "runtimeCreate", {
@@ -285,6 +305,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
           adapterKind: input.adapter ?? input.agent,
           providerThreadId: input.providerThreadId ?? null,
           cwd: input.cwd,
+          effectiveHome: input.effectiveHome ?? null,
           command: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent),
         });
       } catch (error) {
@@ -300,7 +321,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
         channelId: input.channel,
         priorSessionId: input.name,
         intent: { role, workUnitId: null },
-        launch: { executable: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent)[0]!, args: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent).slice(1), cwd: input.cwd },
+        launch: { executable: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent)[0]!, args: normalizeProviderCommand(input.command ?? providerCommand(input.agent, input.prompt), input.agent).slice(1), cwd: input.cwd, home: input.effectiveHome ?? null },
         layout: { terminalColumns: null, terminalRows: null, layoutVersion: "1" },
         adapterKind: input.adapter ?? input.agent,
         lastAcknowledgedDeliveryCursor: "0",
@@ -348,9 +369,22 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       return await daemonRuntime.call("getEvents", {
         channelId: input.channel ?? undefined,
         afterCursor: input.since,
-        sessionId: input.session,
+        sessionId: input.session || undefined,
         limit: input.limit,
         replyToEventId: input.replyToEventId,
+      });
+    },
+
+    async search(input: SearchInput) {
+      return await daemonRuntime.call("search", {
+        query: input.query,
+        scope: input.channel ? "channel" : "all",
+        channelId: input.channel ?? undefined,
+        limit: input.limit,
+        includeControl: input.includeControl,
+        includeChannelDigests: input.channelDigests,
+        includeEvents: input.events,
+        activeOnly: input.activeOnly,
       });
     },
 
@@ -373,7 +407,7 @@ export function createDefaultRoomsCLIBackend(): RoomsCLIBackend {
       const actor = runtimeActor(repository, input.credential);
       return daemonRuntime.callAs(actor.sessionId, "send", { channelId: input.channel, senderSessionId: actor.sessionId, body: input.prompt, target: { kind: "direct", sessionId: input.session, sessionIds: [input.session] } });
     },
-    async runtimeCreate(input: RuntimeCLIInput) { const actor = runtimeActor(repository, input.credential); return daemonRuntime.callAs(actor.sessionId, "runtimeCreate", { runtimeId: input.runtimeId, homeAuthorityId: input.homeAuthorityId ?? homeAuthorityId, sessionId: input.sessionId, generation: input.generation, machineId: input.machineId, stateDir: input.stateDir, shell: input.shell, command: input.command, cwd: input.cwd, channelId: input.channelId, adapterKind: input.adapterKind, providerThreadId: input.providerThreadId ?? null }); },
+    async runtimeCreate(input: RuntimeCLIInput) { const actor = runtimeActor(repository, input.credential); return daemonRuntime.callAs(actor.sessionId, "runtimeCreate", { runtimeId: input.runtimeId, homeAuthorityId: input.homeAuthorityId ?? homeAuthorityId, sessionId: input.sessionId, generation: input.generation, machineId: input.machineId, stateDir: input.stateDir, shell: input.shell, command: input.command, cwd: input.cwd, effectiveHome: input.effectiveHome ?? null, channelId: input.channelId, adapterKind: input.adapterKind, providerThreadId: input.providerThreadId ?? null }); },
     async runtimeList(credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeList", {}); },
     async runtimeQuotaGet(machineId?: string) { return daemonRuntime.call("runtimeQuotaGet", { machineId }); },
     async runtimeQuotaSet(machineId: string, limit: number, credential: string) { const actor = runtimeActor(repository, credential); return daemonRuntime.callAs(actor.sessionId, "runtimeQuotaSet", { machineId, limit }); },

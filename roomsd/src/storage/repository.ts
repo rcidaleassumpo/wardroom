@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { existsSync } from "node:fs";
-import { CursorCodec, RoomsCommandError, type CanonicalImportEvent, type CanonicalMessageCommitInput, type Change, type Channel, type ChannelBroadcastPolicy, type Membership, type MutationReceipt, type Session, type SessionDeliveryMode, type SessionRole, type Snapshot, type ThreadLifecycle } from "../domain/contracts.js";
+import { CursorCodec, RoomsCommandError, type CanonicalImportEvent, type CanonicalMessageCommitInput, type Change, type Channel, type ChannelBroadcastPolicy, type ChannelCoordinationPolicy, type Membership, type MutationReceipt, type Session, type SessionDeliveryMode, type SessionRole, type Snapshot, type ThreadLifecycle } from "../domain/contracts.js";
 import { loadProviderTranscriptLines, resolveProviderTurn, type ProviderTurnPhase } from "../runtime/provider-turn.js";
 import { providerSessionUsage, type ProviderUsage } from "../runtime/provider-usage.js";
 import { migrate, requireCurrentSchema, type SchemaPolicy } from "./migrations.js";
 import { instrumentDatabase, withQueryOperation } from "./query-telemetry.js";
 import { UsageHistoryRepository, type UsageSeries } from "./usage-history.js";
-export type { CanonicalImportEvent, Change, Channel, ChannelBroadcastPolicy, Membership, MutationReceipt, Session, SessionDeliveryMode, SessionRole, Snapshot, ThreadLifecycle } from "../domain/contracts.js";
+export type { CanonicalImportEvent, Change, Channel, ChannelBroadcastPolicy, ChannelCoordinationPolicy, Membership, MutationReceipt, Session, SessionDeliveryMode, SessionRole, Snapshot, ThreadLifecycle } from "../domain/contracts.js";
 
 export type FederationChannelAdmission = Readonly<{
   channelId: string;
@@ -50,6 +50,8 @@ export type SessionInspection = Readonly<{
       updatedAt: string | null;
     }>;
     usage: ProviderUsage;
+    externalOwner: string | null;
+    externalAgentId: string | null;
   }> | null;
 }>;
 
@@ -64,6 +66,8 @@ export type ChannelStateRuntime = Readonly<{
   createdAt: string;
   updatedAt: string;
   endedAt: string | null;
+  externalOwner: string | null;
+  externalAgentId: string | null;
 }>;
 
 export type ChannelStateMember = Readonly<{
@@ -73,6 +77,8 @@ export type ChannelStateMember = Readonly<{
   joinedAt: string;
   sessionEndedAt: string | null;
   runtime: ChannelStateRuntime | null;
+  externalOwner: string | null;
+  externalAgentId: string | null;
 }>;
 
 export type ChannelStateSnapshot = Readonly<{
@@ -99,6 +105,52 @@ export type ChannelControlPages = Readonly<{
 }>;
 
 export class RoomsStoreError extends RoomsCommandError { constructor(code: string, message = code) { super(code, message); this.name = "RoomsStoreError"; } }
+
+/** One channel that matched a search, with enough context to choose it. */
+export type ChannelSearchHit = Readonly<{
+  channelId: string;
+  label: string | null;
+  lifecycleState: Channel["lifecycleState"];
+  registeredAt: string;
+  messageMatches: number;
+  controlMatches: number;
+  /** Which part of the channel matched: its id, label, messages, or control payloads. */
+  matchedIn: ReadonlyArray<"id" | "label" | "message" | "control">;
+  lastMatchAt: string | null;
+  lastActivityAt: string | null;
+  excerpt: string | null;
+}>;
+
+export const SEARCH_DEFAULT_LIMIT = 20;
+export const SEARCH_MAX_LIMIT = 500;
+const SEARCH_EXCERPT_RADIUS = 90;
+
+function searchLimit(value: number | undefined): number {
+  const limit = value ?? SEARCH_DEFAULT_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SEARCH_MAX_LIMIT) throw new RoomsStoreError("invalidLimit", `limit must be an integer between 1 and ${SEARCH_MAX_LIMIT}`);
+  return limit;
+}
+
+/** A query is literal text: its `%`, `_`, and `\` must not act as LIKE syntax. */
+function likePattern(query: string): string {
+  const needle = query.trim().toLowerCase();
+  if (!needle) throw new RoomsStoreError("invalidSearchQuery", "search query must not be empty");
+  return `%${needle.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+}
+
+function searchRank(hit: ChannelSearchHit): string {
+  return hit.lastMatchAt ?? hit.lastActivityAt ?? hit.registeredAt;
+}
+
+function excerptAround(text: string, query: string): string | null {
+  const flat = text.replace(/\s+/gu, " ").trim();
+  if (!flat) return null;
+  const at = flat.toLowerCase().indexOf(query.trim().toLowerCase());
+  if (at < 0) return flat.slice(0, SEARCH_EXCERPT_RADIUS * 2);
+  const start = Math.max(0, at - SEARCH_EXCERPT_RADIUS);
+  const end = Math.min(flat.length, at + query.trim().length + SEARCH_EXCERPT_RADIUS);
+  return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+}
 
 type Row = Record<string, unknown>;
 const now = () => new Date().toISOString();
@@ -167,7 +219,7 @@ export class RoomsRepository {
     const memberships = this.rows(`SELECT channel_id, session_id, joined_at, left_at, session_ended_at, role
       FROM memberships WHERE session_id=? ORDER BY joined_at, channel_id`, id).map(membership);
     const row = this.one(`SELECT r.runtime_id, r.home_authority_id, r.generation, r.state,
-        r.machine_id, r.provider_thread_id, r.effective_cwd, r.ended_at, b.channel_id, b.adapter_kind
+        r.machine_id, r.provider_thread_id, r.effective_cwd, r.ended_at, r.external_owner, r.external_agent_id, b.channel_id, b.adapter_kind
       FROM runtimes r
       LEFT JOIN runtime_bindings b ON b.runtime_id=r.runtime_id AND b.unbound_at IS NULL
       WHERE r.session_id=?
@@ -209,6 +261,8 @@ export class RoomsRepository {
         generation: Number(row.generation),
         state: asString(row.state),
         machineId: asString(row.machine_id),
+        externalOwner: row.external_owner == null ? null : asString(row.external_owner),
+        externalAgentId: row.external_agent_id == null ? null : asString(row.external_agent_id),
         channelId: row.channel_id == null ? null : asString(row.channel_id),
         adapterKind,
         cwd: row.effective_cwd == null ? null : asString(row.effective_cwd),
@@ -266,7 +320,7 @@ export class RoomsRepository {
       const rows = this.rows(`WITH requested(channel_id, ordinal) AS (VALUES ${requested}),
         active_members AS (
           SELECT m.channel_id, m.session_id, m.joined_at, m.session_ended_at,
-            COALESCE(m.role, s.role) AS role, s.display_name
+            COALESCE(m.role, s.role) AS role, s.display_name, s.external_owner, s.external_agent_id
           FROM memberships m
           JOIN sessions s ON s.id=m.session_id
           JOIN requested q ON q.channel_id=m.channel_id
@@ -285,9 +339,10 @@ export class RoomsRepository {
           COALESCE((SELECT MAX(r2.updated_at) FROM runtimes r2
             JOIN runtime_bindings b2 ON b2.runtime_id=r2.runtime_id
             WHERE b2.channel_id=q.channel_id), '') AS runtime_revision,
-          m.session_id, m.display_name, m.role, m.joined_at, m.session_ended_at,
+          m.session_id, m.display_name, m.role, m.joined_at, m.session_ended_at, m.external_owner, m.external_agent_id,
           r.runtime_id, r.home_authority_id, r.generation, r.state, r.machine_id,
-          r.provider_thread_id, r.created_at, r.updated_at, r.ended_at, r.adapter_kind
+          r.provider_thread_id, r.created_at, r.updated_at, r.ended_at, r.adapter_kind,
+          r.external_owner AS runtime_external_owner, r.external_agent_id AS runtime_external_agent_id
         FROM requested q
         LEFT JOIN channels c ON c.id=q.channel_id
         LEFT JOIN active_members m ON m.channel_id=q.channel_id
@@ -313,6 +368,8 @@ export class RoomsRepository {
           role: row.role == null ? null : row.role as SessionRole,
           joinedAt: asString(row.joined_at),
           sessionEndedAt: row.session_ended_at == null ? null : asString(row.session_ended_at),
+          externalOwner: row.external_owner == null ? null : asString(row.external_owner),
+          externalAgentId: row.external_agent_id == null ? null : asString(row.external_agent_id),
           runtime: row.runtime_id == null ? null : {
             runtimeId: asString(row.runtime_id),
             homeAuthorityId: asString(row.home_authority_id),
@@ -324,6 +381,8 @@ export class RoomsRepository {
             createdAt: asString(row.created_at),
             updatedAt: asString(row.updated_at),
             endedAt: row.ended_at == null ? null : asString(row.ended_at),
+            externalOwner: row.runtime_external_owner == null ? null : asString(row.runtime_external_owner),
+            externalAgentId: row.runtime_external_agent_id == null ? null : asString(row.runtime_external_agent_id),
           },
         });
       }
@@ -455,8 +514,8 @@ export class RoomsRepository {
       ORDER BY r.created_at DESC`, providerThreadId).map((row) => asString(row.id));
   }
 
-  activeRuntimeIdentityForSession(sessionId: string): Readonly<{ provider: string | null; providerThreadId: string | null; machineId: string }> | null {
-    const row = this.one(`SELECT b.adapter_kind, COALESCE(r.provider_thread_id, s.provider_thread_id) AS provider_thread_id, r.machine_id
+  activeRuntimeIdentityForSession(sessionId: string): Readonly<{ provider: string | null; providerThreadId: string | null; machineId: string; effectiveHome: string | null }> | null {
+    const row = this.one(`SELECT b.adapter_kind, COALESCE(r.provider_thread_id, s.provider_thread_id) AS provider_thread_id, r.machine_id, r.effective_home
       FROM sessions s
       JOIN runtimes r ON r.session_id = s.id
       LEFT JOIN runtime_bindings b ON b.runtime_id = r.runtime_id AND b.unbound_at IS NULL
@@ -468,6 +527,7 @@ export class RoomsRepository {
       provider: row.adapter_kind == null ? null : String(row.adapter_kind),
       providerThreadId: row.provider_thread_id == null ? null : String(row.provider_thread_id),
       machineId: asString(row.machine_id),
+      effectiveHome: row.effective_home == null ? null : String(row.effective_home),
     };
   }
 
@@ -559,12 +619,12 @@ export class RoomsRepository {
     if (this.importActive) { this.db.exec("ROLLBACK"); this.importActive = false; }
   }
 
-  insertSession(input: { id: string; displayName?: string | null; role?: SessionRole | null; externalId?: string | null; deliveryMode?: SessionDeliveryMode | null }): MutationReceipt {
+  insertSession(input: { id: string; displayName?: string | null; role?: SessionRole | null; externalId?: string | null; deliveryMode?: SessionDeliveryMode | null; externalOwner?: string | null; externalAgentId?: string | null }): MutationReceipt {
     return this.write(() => {
       if (this.one("SELECT id FROM sessions WHERE id = ?", input.id)) throw new RoomsStoreError("sessionAlreadyExists");
       const registeredAt = now();
       const deliveryMode = input.deliveryMode ?? "runtime";
-      this.db.prepare("INSERT INTO sessions(id, registered_at, display_name, role, external_id, delivery_mode) VALUES (?, ?, ?, ?, ?, ?)").run(input.id, registeredAt, input.displayName ?? null, input.role ?? null, input.externalId ?? null, deliveryMode);
+      this.db.prepare("INSERT INTO sessions(id, registered_at, display_name, role, external_id, delivery_mode, external_owner, external_agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(input.id, registeredAt, input.displayName ?? null, input.role ?? null, input.externalId ?? null, deliveryMode, input.externalOwner ?? null, input.externalAgentId ?? null);
       return this.appendChange("session.registered", null, { id: input.id, registeredAt, displayName: input.displayName ?? null, role: input.role ?? null, externalId: input.externalId ?? null, deliveryMode });
     });
   }
@@ -574,11 +634,14 @@ export class RoomsRepository {
     return this.rows("SELECT id FROM sessions WHERE external_id = ? AND ended_at IS NULL", externalId).map(row => asString(row.id));
   }
 
-  registerSession(channelId: string, sessionId: string, role: SessionRole, externalId: string | null = null, deliveryMode: SessionDeliveryMode | null = null, displayName: string | null = null): { session: Session; membership: Membership; idempotent: boolean } {
+  registerSession(channelId: string, sessionId: string, role: SessionRole, externalId: string | null = null, deliveryMode: SessionDeliveryMode | null = null, provenance: { externalOwner?: string | null; externalAgentId?: string | null } = {}): { session: Session; membership: Membership; idempotent: boolean } {
     return this.command(() => {
       if (!this.currentChannel(channelId)) throw new RoomsStoreError("channelNotFound");
       const existing = this.currentSession(sessionId);
-      const sessionReceipt = existing ? null : this.insertSession({ id: sessionId, displayName, role, externalId, deliveryMode });
+      const owner = provenance.externalOwner?.trim() || null;
+      const agent = provenance.externalAgentId?.trim() || null;
+      if ((owner === null) !== (agent === null)) throw new RoomsStoreError("invalidExternalProvenance", "externalOwner and externalAgentId must be supplied together");
+      const sessionReceipt = existing ? null : this.insertSession({ id: sessionId, role, externalId, deliveryMode, externalOwner: owner, externalAgentId: agent });
       // Binding an existing mailbox to a caller is idempotent, but never silently reassigns it.
       if (existing && externalId) {
         const current = this.one("SELECT external_id FROM sessions WHERE id = ?", sessionId)?.external_id as string | null;
@@ -589,9 +652,17 @@ export class RoomsRepository {
         this.db.prepare("UPDATE sessions SET delivery_mode = ? WHERE id = ?").run(deliveryMode, sessionId);
         this.appendChange("session.delivery.updated", null, { id: sessionId, deliveryMode });
       }
+      if (existing && owner && existing.externalOwner && (existing.externalOwner !== owner || existing.externalAgentId !== agent)) throw new RoomsStoreError("externalProvenanceAlreadyBound");
+      if (existing && owner && !existing.externalOwner) this.db.prepare("UPDATE sessions SET external_owner=?, external_agent_id=? WHERE id=?").run(owner, agent, sessionId);
       if (!this.isActiveMember(channelId, sessionId)) this.insertMembership(channelId, sessionId, role);
       return { session: this.currentSession(sessionId)!, membership: this.membershipsFor(channelId, sessionId), idempotent: Boolean(existing) };
     });
+  }
+
+  ownedSessions(channelId: string, externalOwner: string): Session[] {
+    return this.rows(`SELECT s.* FROM sessions s JOIN memberships m ON m.session_id=s.id
+      WHERE m.channel_id=? AND m.left_at IS NULL AND m.session_ended_at IS NULL
+        AND s.ended_at IS NULL AND s.external_owner=? ORDER BY m.joined_at, s.id`, channelId, externalOwner).map(session);
   }
 
   insertChannel(input: { id: string; ownerOperatorSessionId?: string | null }): MutationReceipt {
@@ -639,6 +710,22 @@ export class RoomsRepository {
     });
   }
 
+  reactivateOperatorSession(sessionId: string): MutationReceipt {
+    return this.write(() => {
+      const existing = this.currentSession(sessionId);
+      if (!existing || existing.role !== "operator") throw new RoomsStoreError("operatorSessionNotRecoverable");
+      const reactivatedAt = now();
+      const sessionChanges = this.db.prepare(`UPDATE sessions SET ended_at = NULL, external_owner = NULL, external_agent_id = NULL
+        WHERE id = ? AND (ended_at IS NOT NULL OR external_owner IS NOT NULL OR external_agent_id IS NOT NULL)`).run(sessionId).changes;
+      const membershipChanges = this.db.prepare(`UPDATE memberships SET session_ended_at = NULL
+        WHERE session_id = ? AND role = 'operator' AND left_at IS NULL
+          AND session_ended_at IS NOT NULL
+          AND channel_id IN (SELECT id FROM channels WHERE lifecycle_state = 'active')`).run(sessionId).changes;
+      if (Number(sessionChanges) + Number(membershipChanges) === 0) return { cursor: this.latestCursor(), didAppend: false, changes: [] };
+      return this.appendChange("session.reactivated", null, { sessionId, reactivatedAt });
+    });
+  }
+
   closeChannel(channelId: string): MutationReceipt {
     return this.write(() => {
       const channel = this.one("SELECT id, lifecycle_state FROM channels WHERE id = ?", channelId);
@@ -682,6 +769,16 @@ export class RoomsRepository {
     });
   }
 
+  updateChannelCoordinationPolicy(channelId: string, policy: ChannelCoordinationPolicy): MutationReceipt {
+    return this.write(() => {
+      if (!this.one("SELECT id FROM channels WHERE id = ?", channelId)) throw new RoomsStoreError("unknownChannel");
+      const current = (this.one("SELECT coordination_policy FROM channels WHERE id = ?", channelId)?.coordination_policy as ChannelCoordinationPolicy | null) ?? "open";
+      if (current === policy) return { changes: [], cursor: this.latestCursor(), didAppend: false };
+      this.db.prepare("UPDATE channels SET coordination_policy=? WHERE id=?").run(policy, channelId);
+      return this.appendChange("channel.coordination-policy.updated", channelId, { id: channelId, coordinationPolicy: policy });
+    });
+  }
+
   commitMessage(input: CanonicalMessageCommitInput): MutationReceipt & { event: unknown; wasDeduplicated?: boolean } {
     return this.write(() => {
       const target = input.target as any;
@@ -704,6 +801,7 @@ export class RoomsRepository {
         senderSessionId: input.senderSessionId,
         body: input.body,
         target,
+        attachmentReferences: input.attachmentReferences ? [...input.attachmentReferences] : [],
         deliveredRecipientSessionIds: recipients.filter((id: string) => statuses[id] === "delivered"),
         recipientStatuses: statuses,
         correlation,
@@ -854,6 +952,15 @@ export class RoomsRepository {
     return CursorCodec.encode(BigInt(String(row.cursor)));
   }
 
+  messageByDeduplicationKey(key: string, channelId: string): { event: unknown; cursor: string } | null {
+    const row = this.one("SELECT cursor, payload FROM changes WHERE kind='message.sent' AND channel_id=? AND json_extract(payload, '$.correlation.deduplicationKey')=? ORDER BY cursor LIMIT 1", channelId, key);
+    if (!row) return null;
+    const stored = JSON.parse(asString(row.payload)) as { id?: string };
+    if (!stored.id) return null;
+    const history = this.rows("SELECT kind, payload FROM changes WHERE channel_id=? AND (json_extract(payload, '$.id')=? OR json_extract(payload, '$.messageId')=?) ORDER BY cursor", channelId, stored.id, stored.id) as { kind: string; payload: unknown }[];
+    return { event: this.foldMessageEvents(history)[0], cursor: CursorCodec.encode(BigInt(String(row.cursor))) };
+  }
+
   /** Resolve one canonical message by its opaque event id. */
   messageById(eventId: string, channelId?: string): { event: unknown; cursor: string } {
     if (!eventId.trim()) throw new RoomsStoreError("unknownMessage");
@@ -904,6 +1011,128 @@ export class RoomsRepository {
       oldestCursor: page.length > 0 ? CursorCodec.encode(page[0]!.cursor as bigint) : null,
       hasMore,
     };
+  }
+
+  /**
+   * Return the newest committed messages whose body contains one query.
+   *
+   * The store holds every change, so a caller that filters in memory has to
+   * pull the whole history across its transport first. This keeps the match
+   * and the bound in SQLite and returns only the page.
+   */
+  searchMessages(query: string, options: { channelId?: string | null; limit?: number } = {}): { events: unknown[] } {
+    const limit = searchLimit(options.limit);
+    const pattern = likePattern(query);
+    const channelId = options.channelId?.trim() ? options.channelId.trim() : null;
+    const rows = this.rows(
+      `SELECT payload FROM changes
+       WHERE kind='message.sent' ${channelId ? "AND channel_id = ?" : ""}
+         AND lower(json_extract(payload, '$.body')) LIKE ? ESCAPE '\\'
+       ORDER BY cursor DESC LIMIT ?`,
+      ...(channelId ? [channelId, pattern, limit] : [pattern, limit]),
+    );
+    return { events: rows.map((row) => JSON.parse(asString(row.payload))) };
+  }
+
+  /**
+   * Find channels whose id, label, message bodies, or control payloads contain
+   * one query, newest match first.
+   *
+   * A channel id is the only durable handle Rooms guarantees, and callers who
+   * only remember what was discussed cannot recover it from `listChannels`.
+   * This is a scan, not an index: cost grows with retained history. It stays
+   * bounded per query and never folds a whole channel into memory.
+   */
+  searchChannels(query: string, options: { limit?: number; includeControl?: boolean; activeOnly?: boolean } = {}): ChannelSearchHit[] {
+    const limit = searchLimit(options.limit);
+    const pattern = likePattern(query);
+    const includeControl = options.includeControl !== false;
+    const controlClause = includeControl ? `OR (kind='control.committed' AND lower(json_extract(payload, '$.payload')) LIKE ? ESCAPE '\\')` : "";
+    const eventParameters = includeControl ? [pattern, pattern] : [pattern];
+    const matches = this.rows(
+      `SELECT channel_id AS id,
+              SUM(CASE WHEN kind='message.sent' THEN 1 ELSE 0 END) AS message_matches,
+              SUM(CASE WHEN kind='control.committed' THEN 1 ELSE 0 END) AS control_matches,
+              MAX(occurred_at) AS last_match_at
+       FROM changes
+       WHERE channel_id IS NOT NULL
+         AND ((kind='message.sent' AND lower(json_extract(payload, '$.body')) LIKE ? ESCAPE '\\') ${controlClause})
+       GROUP BY channel_id`,
+      ...eventParameters,
+    );
+    const named = this.rows(
+      `SELECT id FROM channels WHERE lower(id) LIKE ? ESCAPE '\\' OR lower(ifnull(label, '')) LIKE ? ESCAPE '\\'`,
+      pattern, pattern,
+    );
+    const candidates = new Map<string, { messageMatches: number; controlMatches: number; lastMatchAt: string | null }>();
+    for (const row of matches) {
+      candidates.set(asString(row.id), {
+        messageMatches: Number(row.message_matches ?? 0),
+        controlMatches: Number(row.control_matches ?? 0),
+        lastMatchAt: row.last_match_at == null ? null : asString(row.last_match_at),
+      });
+    }
+    // A channel whose name matches is a hit even when it holds no message yet.
+    for (const row of named) {
+      const id = asString(row.id);
+      if (!candidates.has(id)) candidates.set(id, { messageMatches: 0, controlMatches: 0, lastMatchAt: null });
+    }
+    const hits: ChannelSearchHit[] = [];
+    for (const [id, match] of candidates) {
+      const row = this.one("SELECT * FROM channels WHERE id = ?", id);
+      if (!row) continue;
+      const lifecycleState = row.lifecycle_state as Channel["lifecycleState"];
+      if (options.activeOnly && lifecycleState !== "active") continue;
+      const label = row.label as string | null;
+      const needle = query.trim().toLowerCase();
+      const matchedIn: Array<"id" | "label" | "message" | "control"> = [];
+      if (id.toLowerCase().includes(needle)) matchedIn.push("id");
+      if (label && label.toLowerCase().includes(needle)) matchedIn.push("label");
+      if (match.messageMatches > 0) matchedIn.push("message");
+      if (match.controlMatches > 0) matchedIn.push("control");
+      hits.push({
+        channelId: id,
+        label,
+        lifecycleState,
+        registeredAt: asString(row.registered_at),
+        messageMatches: match.messageMatches,
+        controlMatches: match.controlMatches,
+        matchedIn,
+        lastMatchAt: match.lastMatchAt,
+        lastActivityAt: this.lastChannelActivity(id),
+        excerpt: null,
+      });
+    }
+    // Recency answers "which channel was I in?" better than match volume: an
+    // old channel with many mentions is rarely the one the caller means.
+    hits.sort((left, right) => {
+      const first = searchRank(left);
+      const second = searchRank(right);
+      if (first === second) return left.channelId.localeCompare(right.channelId);
+      return first < second ? 1 : -1;
+    });
+    return hits.slice(0, limit).map((hit) => ({ ...hit, excerpt: this.channelMatchExcerpt(hit.channelId, pattern, includeControl, query) }));
+  }
+
+  private lastChannelActivity(channelId: string): string | null {
+    const row = this.one("SELECT MAX(occurred_at) AS last FROM changes WHERE channel_id = ?", channelId);
+    return row?.last == null ? null : asString(row.last);
+  }
+
+  /** One readable window around the newest match, so a hit can be judged without opening the channel. */
+  private channelMatchExcerpt(channelId: string, pattern: string, includeControl: boolean, query: string): string | null {
+    const controlClause = includeControl ? `OR (kind='control.committed' AND lower(json_extract(payload, '$.payload')) LIKE ? ESCAPE '\\')` : "";
+    const row = this.one(
+      `SELECT kind, payload FROM changes
+       WHERE channel_id = ?
+         AND ((kind='message.sent' AND lower(json_extract(payload, '$.body')) LIKE ? ESCAPE '\\') ${controlClause})
+       ORDER BY cursor DESC LIMIT 1`,
+      ...(includeControl ? [channelId, pattern, pattern] : [channelId, pattern]),
+    );
+    if (!row) return null;
+    const payload = JSON.parse(asString(row.payload)) as { body?: unknown; payload?: unknown };
+    const text = row.kind === "message.sent" ? String(payload.body ?? "") : JSON.stringify(payload.payload ?? "");
+    return excerptAround(text, query);
   }
 
   /** Channel federation must never inherit channel-less global messages. */
@@ -1009,6 +1238,47 @@ export class RoomsRepository {
       events: page.map((row) => JSON.parse(asString(row.payload))),
       cursor: CursorCodec.encode(latestCursor),
       oldestCursor: page.length > 0 ? CursorCodec.encode(page[0].cursor as bigint) : null,
+      hasMore,
+    };
+  }
+
+  /**
+   * Return the newest page of one channel's messages.
+   *
+   * Reading a channel used to need a member session id, so a caller holding
+   * only the channel had to fetch a roster first, and the session-less path
+   * replayed the whole channel across the socket.
+   */
+  channelMessages(
+    channelId: string,
+    options: { afterCursor?: string; limit?: number } = {},
+  ): { events: unknown[]; cursor: string; oldestCursor: string | null; hasMore: boolean } {
+    let n: bigint;
+    try { n = CursorCodec.decode(options.afterCursor ?? "0"); } catch { throw new RoomsStoreError("invalidCursor"); }
+    const limit = options.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new RoomsStoreError("invalidLimit");
+    if (!channelId.trim()) throw new RoomsStoreError("invalidChannel");
+    const rows = this.cursorRows(
+      `WITH latest AS (
+         SELECT COALESCE(MAX(cursor), ?) AS cursor FROM changes WHERE cursor > ? AND channel_id = ?
+       ), relevant AS (
+         SELECT cursor, payload FROM changes
+         WHERE cursor > ? AND kind = 'message.sent' AND channel_id = ?
+         ORDER BY cursor DESC LIMIT ?
+       )
+       SELECT relevant.cursor, relevant.payload, latest.cursor AS latest_cursor
+       FROM latest LEFT JOIN relevant ON 1=1
+       ORDER BY relevant.cursor DESC`,
+      n, n, channelId, n, channelId, limit + 1,
+    );
+    const relevant = rows.filter((row) => row.payload != null);
+    const hasMore = relevant.length > limit;
+    const page = (hasMore ? relevant.slice(0, limit) : relevant).reverse();
+    const latestCursor = rows[0]?.latest_cursor == null ? n : BigInt(rows[0].latest_cursor as bigint | number);
+    return {
+      events: page.map((row) => JSON.parse(asString(row.payload))),
+      cursor: CursorCodec.encode(latestCursor),
+      oldestCursor: page.length > 0 ? CursorCodec.encode(page[0]!.cursor as bigint) : null,
       hasMore,
     };
   }
@@ -1120,8 +1390,8 @@ export class RoomsRepository {
   }
 }
 
-function session(row: Row): Session { return { id: asString(row.id), registeredAt: asString(row.registered_at), endedAt: row.ended_at as string | null, displayName: row.display_name as string | null, role: row.role as SessionRole | null, providerThreadId: row.provider_thread_id == null ? null : String(row.provider_thread_id), deliveryMode: (row.delivery_mode as SessionDeliveryMode | null) ?? "runtime" }; }
-function channel(row: Row): Channel { return { id: asString(row.id), label: row.label as string | null, registeredAt: asString(row.registered_at), ownerOperatorSessionId: row.owner_operator_session_id as string | null, lifecycleState: row.lifecycle_state as Channel["lifecycleState"], closedAt: row.closed_at as string | null, broadcastPolicy: (row.broadcast_policy as ChannelBroadcastPolicy | null) ?? "all" }; }
+function session(row: Row): Session { return { id: asString(row.id), registeredAt: asString(row.registered_at), endedAt: row.ended_at as string | null, displayName: row.display_name as string | null, role: row.role as SessionRole | null, providerThreadId: row.provider_thread_id == null ? null : String(row.provider_thread_id), deliveryMode: (row.delivery_mode as SessionDeliveryMode | null) ?? "runtime", externalOwner: row.external_owner == null ? null : String(row.external_owner), externalAgentId: row.external_agent_id == null ? null : String(row.external_agent_id) }; }
+function channel(row: Row): Channel { return { id: asString(row.id), label: row.label as string | null, registeredAt: asString(row.registered_at), ownerOperatorSessionId: row.owner_operator_session_id as string | null, lifecycleState: row.lifecycle_state as Channel["lifecycleState"], closedAt: row.closed_at as string | null, broadcastPolicy: (row.broadcast_policy as ChannelBroadcastPolicy | null) ?? "all", coordinationPolicy: (row.coordination_policy as ChannelCoordinationPolicy | null) ?? "open" }; }
 function federationChannelAdmission(row: Row): FederationChannelAdmission { return { channelId: asString(row.channel_id), peerAuthorityId: asString(row.peer_authority_id), grantedBySessionId: asString(row.granted_by_session_id), grantedAt: asString(row.granted_at), revokedBySessionId: row.revoked_by_session_id as string | null, revokedAt: row.revoked_at as string | null }; }
 function membership(row: Row): Membership { return { channelId: asString(row.channel_id), sessionId: asString(row.session_id), joinedAt: asString(row.joined_at), leftAt: row.left_at as string | null, sessionEndedAt: row.session_ended_at as string | null, role: row.role as SessionRole | null }; }
 function threadLifecycle(row: Row): ThreadLifecycle { return { threadRootEventId: asString(row.thread_root_event_id), channelId: asString(row.channel_id), state: row.state as ThreadLifecycle["state"], resolvedAt: row.resolved_at as string | null, resolvedBySessionId: row.resolved_by_session_id as string | null, reopenedAt: row.reopened_at as string | null, reopenedBySessionId: row.reopened_by_session_id as string | null, updatedAt: row.updated_at as string | null }; }

@@ -4,8 +4,45 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { setupMachineIdentity } from "../src/identity/machine-identity.js";
 import { createNativeComposition } from "../src/runtime/native/composition.js";
+import { RoomsRepository } from "../src/storage/repository.js";
+import { createChannelProfileRevision } from "../src/profiles/profile-revision-store.js";
 
 describe("owner-only local service contract", () => {
+  it("lists and ends only authenticated external-owner sessions with exact runtime generations", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-owned-sessions-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "operator", role: "operator", externalOwner: "mycelia", externalAgentId: "operator" });
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "operator" });
+      composition.database.insertMembership("proof", "operator", "operator");
+      composition.database.registerSession("proof", "owned", "worker", null, "runtime", { externalOwner: "mycelia", externalAgentId: "agent-1" });
+      composition.database.registerSession("proof", "other", "worker", null, "runtime", { externalOwner: "other-product", externalAgentId: "agent-2" });
+      composition.database.registerSession("proof", "legacy", "worker");
+      const connection = { authenticatedSessionId: "operator", credentials: new Map([["credential", "operator"]]), onClose: new Set<() => void>() };
+      const authenticated = { context: { credential: "credential" }, __connection: connection, channelId: "proof", externalOwner: "mycelia" };
+      const terminated: Array<{ runtimeId: string; generation: number }> = [];
+      composition.runtimeService.list = async () => ({ runtimes: [
+        { runtimeId: "remote-owned", sessionId: "owned", generation: 7, state: "running", endedAt: null },
+        { runtimeId: "remote-other", sessionId: "other", generation: 9, state: "running", endedAt: null },
+      ] }) as never;
+      composition.runtimeService.terminate = async (request: any) => { terminated.push(request); return { ok: true } as never; };
+
+      await expect(composition.handler.listOwnedSessions!({ ...authenticated } as never)).resolves.toMatchObject({ sessions: [{ id: "operator" }, { id: "owned" }] });
+      await expect(composition.handler.endOwnedSessions!({ ...authenticated, sessionIds: ["other"] } as never)).rejects.toThrow("externalOwnerAccessDenied");
+      await expect(composition.handler.endOwnedSessions!({ ...authenticated, sessionIds: ["owned"] } as never)).resolves.toEqual({ ended: [{ sessionId: "owned", runtimes: [{ runtimeId: "remote-owned", generation: 7 }] }] });
+      expect(terminated).toEqual([{ runtimeId: "remote-owned", generation: 7 }]);
+      expect(composition.database.currentSession("owned")?.endedAt).not.toBeNull();
+      expect(composition.database.currentSession("other")?.endedAt).toBeNull();
+      expect(composition.database.currentSession("legacy")?.externalOwner).toBeNull();
+      composition.database.close();
+      const reopened = new RoomsRepository(join(stateDir, "rooms.sqlite"));
+      expect(reopened.currentSession("owned")).toMatchObject({ externalOwner: "mycelia", externalAgentId: "agent-1" });
+      expect(reopened.currentSession("other")).toMatchObject({ externalOwner: "other-product", externalAgentId: "agent-2", endedAt: null });
+      reopened.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
   it("covers the Mycelia channel, session, message, lifecycle, and provider operations without the CLI", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "rooms-local-service-"));
     const executable = join(stateDir, "codex-test");
@@ -20,10 +57,27 @@ describe("owner-only local service contract", () => {
       const connection = { authenticatedSessionId: "operator", credentials: new Map([["credential", "operator"]]), onClose: new Set<() => void>() };
       const authenticated = { context: { credential: "credential" }, __connection: connection };
 
+      createChannelProfileRevision({
+        stateDir,
+        id: "profile-1",
+        name: "Proof profile",
+        channelId: "proof",
+        version: 1,
+        createdAt: "2026-08-14T00:00:00.000Z",
+        createdBySessionId: "operator",
+        instructions: { id: "channel", text: "Rules\n" },
+        projectInstructions: { mode: "exclude" },
+        modelSkillSets: [{ id: "codex-default", provider: "codex", model: "gpt-5", catalogVersion: "test", authMode: "subscription", skills: [], allowedBuiltinTools: [], providerSpecificResolvedItems: [] }],
+      });
+
       await expect(composition.handler.listProviders!({ ...authenticated } as never)).resolves.toEqual({ providers: [] });
       const saved = await composition.handler.writeProvider!({ ...authenticated, mode: "register", name: "codex", executable, adapter: "codex", enabled: true, defaults: { permissions: "manual" } } as never);
       expect(saved.providers).toMatchObject([{ name: "codex", adapter: "codex", enabled: true, launchOptions: { type: "object" } }]);
       expect(saved.providers[0]?.executable).toMatch(/codex-test$/);
+      await expect(composition.handler.listChannelProfileRevisions!({ ...authenticated, channelId: "proof" } as never)).resolves.toMatchObject({ revisions: [{ id: "profile-1", name: "Proof profile", modelSkillSets: [{ id: "codex-default", provider: "codex", model: "gpt-5" }] }] });
+      composition.database.insertSession({ id: "outsider", role: "worker" });
+      const outsiderConnection = { authenticatedSessionId: "outsider", credentials: new Map([["outsider-credential", "outsider"]]), onClose: new Set<() => void>() };
+      await expect(composition.handler.listChannelProfileRevisions!({ channelId: "proof", context: { credential: "outsider-credential" }, __connection: outsiderConnection } as never)).rejects.toThrow("notMember");
 
       const registered = await composition.handler.registerChannelSession!({ ...authenticated, channelId: "proof", sessionId: "log-worker", role: "worker", deliveryMode: "log" } as never);
       expect(registered).toMatchObject({ session: { id: "log-worker" }, membership: { sessionId: "log-worker" } });

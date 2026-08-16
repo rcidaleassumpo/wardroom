@@ -80,7 +80,10 @@ function serve(socket: Socket, localStateDir: string, handler: RelayApplicationH
   socket.on("data", (chunk) => onData?.(chunk));
   socket.on("drain", () => onDrain?.());
   socket.once("close", () => onClose?.({ reason: "peerClosed", message: "local relay proxy closed" }));
-  socket.once("error", (error) => onClose?.({ reason: "transportError", message: error.message }));
+  // A broken pipe can emit more than one socket error while RelayConnection
+  // tears the duplex down. Keep the listener for the socket's full lifetime so
+  // a second EPIPE cannot become an uncaught process error.
+  socket.on("error", (error) => onClose?.({ reason: "transportError", message: error.message }));
   const duplex: RelayByteDuplex = { write: (data) => socket.write(data), onData: (cb) => { onData = cb; }, onDrain: (cb) => { onDrain = cb; }, onceClose: (cb) => { onClose = cb; }, destroy: () => socket.destroy() };
   let handshakeHeld = true;
   let admittedPeer: string | undefined;

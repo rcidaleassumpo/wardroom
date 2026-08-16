@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { RoomsStoreError } from "./repository.js";
 import type {
@@ -40,8 +40,8 @@ export class RuntimeRepository {
       if (active >= quota.maxActiveRuntimes) throw new RoomsStoreError("runtimeQuotaExceeded");
       const createdAt = now();
       try {
-        this.db.prepare(`INSERT INTO runtimes(runtime_id, home_authority_id, session_id, generation, protocol_version, transport_kind, state, machine_id, reconnect_secret_hash, provider_thread_id, effective_cwd, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?)`).run(input.runtimeId, input.homeAuthorityId, input.sessionId, input.generation, input.protocolVersion, input.transportKind, input.machineId, hash(input.reconnectSecret), input.providerThreadId ?? null, input.effectiveCwd ?? null, createdAt, createdAt);
+        this.db.prepare(`INSERT INTO runtimes(runtime_id, home_authority_id, session_id, generation, protocol_version, transport_kind, state, machine_id, reconnect_secret_hash, session_proof_hash, provider_thread_id, effective_cwd, effective_home, external_owner, external_agent_id, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?, ?, ?, external_owner, external_agent_id, ?, ? FROM sessions WHERE id=?`).run(input.runtimeId, input.homeAuthorityId, input.sessionId, input.generation, input.protocolVersion, input.transportKind, input.machineId, hash(input.reconnectSecret), input.sessionProof ? hash(input.sessionProof) : null, input.providerThreadId ?? null, input.effectiveCwd ?? null, input.effectiveHome ?? null, createdAt, createdAt, input.sessionId);
       } catch (error) { throw mapConstraint(error, "runtimeAlreadyExists"); }
       const runtime = this.get(input.runtimeId);
       if (!runtime) throw new RoomsStoreError("runtimeCreateFailed");
@@ -120,6 +120,27 @@ export class RuntimeRepository {
   list(machineId?: string): Runtime[] {
     const rows = machineId ? this.rows("SELECT * FROM runtimes WHERE machine_id=? ORDER BY created_at, runtime_id", machineId) : this.rows("SELECT * FROM runtimes ORDER BY created_at, runtime_id");
     return rows.map(toRuntime);
+  }
+
+  provesActiveSession(sessionId: string, proof: Uint8Array): boolean {
+    if (!sessionId || proof.byteLength < 32 || proof.byteLength > 256) return false;
+    const expected = this.one(`SELECT session_proof_hash FROM runtimes
+      WHERE session_id=? AND ended_at IS NULL AND state IN ('creating','running','recovering')
+        AND session_proof_hash IS NOT NULL
+      ORDER BY generation DESC, created_at DESC LIMIT 1`, sessionId)?.session_proof_hash;
+    if (typeof expected !== "string" || !/^[0-9a-f]{64}$/.test(expected)) return false;
+    return timingSafeEqual(Buffer.from(hash(proof), "hex"), Buffer.from(expected, "hex"));
+  }
+
+  legacyOperatorSessionsNeedingProof(): string[] {
+    return this.rows(`SELECT sessions.id
+      FROM sessions
+      WHERE sessions.role='operator' AND sessions.ended_at IS NULL
+        AND EXISTS (SELECT 1 FROM runtimes legacy WHERE legacy.session_id=sessions.id AND legacy.session_proof_hash IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM runtimes current WHERE current.session_id=sessions.id
+          AND current.ended_at IS NULL AND current.state IN ('creating','running','recovering')
+          AND current.session_proof_hash IS NOT NULL)
+      ORDER BY sessions.id`).map(row => text(row.id));
   }
 
   plannerCanLaunchWorker(plannerSessionId: string, workerSessionId: string, channelId: string): boolean {
@@ -356,7 +377,7 @@ function assertSameGeneration(runtime: Runtime, input: { homeAuthorityId: string
 }
 function mapConstraint(error: unknown, fallback: string): RoomsStoreError { return isConstraint(error) ? new RoomsStoreError(fallback) : error as RoomsStoreError; }
 function isConstraint(error: unknown): boolean { return error instanceof Error && /constraint|unique|check|foreign key/i.test(error.message); }
-function toRuntime(row: Row): Runtime { return { runtimeId: text(row.runtime_id), homeAuthorityId: text(row.home_authority_id), sessionId: text(row.session_id), providerThreadId: optionalText(row.provider_thread_id), effectiveCwd: optionalText(row.effective_cwd), generation: Number(row.generation), protocolVersion: Number(row.protocol_version), transportKind: row.transport_kind as Runtime["transportKind"], state: row.state as RuntimeState, machineId: text(row.machine_id), reconnectSecretHash: text(row.reconnect_secret_hash), createdAt: text(row.created_at), updatedAt: text(row.updated_at), endedAt: optionalText(row.ended_at), exitReason: optionalText(row.exit_reason) }; }
+function toRuntime(row: Row): Runtime { return { runtimeId: text(row.runtime_id), homeAuthorityId: text(row.home_authority_id), sessionId: text(row.session_id), providerThreadId: optionalText(row.provider_thread_id), effectiveCwd: optionalText(row.effective_cwd), effectiveHome: optionalText(row.effective_home), generation: Number(row.generation), protocolVersion: Number(row.protocol_version), transportKind: row.transport_kind as Runtime["transportKind"], state: row.state as RuntimeState, machineId: text(row.machine_id), reconnectSecretHash: text(row.reconnect_secret_hash), sessionProofHash: optionalText(row.session_proof_hash), createdAt: text(row.created_at), updatedAt: text(row.updated_at), endedAt: optionalText(row.ended_at), exitReason: optionalText(row.exit_reason), externalOwner: optionalText(row.external_owner), externalAgentId: optionalText(row.external_agent_id) }; }
 function toBinding(row: Row): RuntimeBinding { return { bindingId: text(row.binding_id), runtimeId: text(row.runtime_id), homeAuthorityId: text(row.home_authority_id), sessionId: text(row.session_id), generation: Number(row.generation), channelId: optionalText(row.channel_id), adapterKind: text(row.adapter_kind), handleRef: text(row.handle_ref), launchPolicyRef: optionalText(row.launch_policy_ref), boundAt: text(row.bound_at), unboundAt: optionalText(row.unbound_at) }; }
 function toAttachment(row: Row): RuntimeAttachment { return { attachmentId: text(row.attachment_id), runtimeId: text(row.runtime_id), homeAuthorityId: text(row.home_authority_id), sessionId: text(row.session_id), generation: Number(row.generation), viewerId: text(row.viewer_id), mode: row.mode as AttachmentMode, leaseExpiresAt: optionalText(row.lease_expires_at), outputCursor: BigInt(row.output_cursor as bigint | number), attachedAt: text(row.attached_at), detachedAt: optionalText(row.detached_at), lastSeenAt: optionalText(row.last_seen_at) }; }
 function toEvent(row: Row): RuntimeEvent { return { runtimeId: text(row.runtime_id), generation: Number(row.generation), eventSeq: Number(row.event_seq), eventId: text(row.event_id), kind: row.kind as RuntimeEventKind, outputCursor: row.output_cursor == null ? null : BigInt(row.output_cursor as bigint | number), messageId: optionalText(row.message_id), outcome: optionalText(row.outcome), payload: JSON.parse(text(row.payload_json)) as Readonly<Record<string, string | number | boolean | null>>, occurredAt: text(row.occurred_at) }; }

@@ -23,4 +23,13 @@ describe("Rooms API handler", () => {
       value: { status: { state: "running" } }, done: false,
     });
   });
+
+  it("exposes the private lead broadcast extension through the transport-neutral handler", async () => {
+    const leadBroadcast = vi.fn(async () => ({ idempotencyKey: "key", results: [{ channelId: "alpha", status: "sent" as const }] }));
+    const handler = createRoomsServiceHandler({ service: { leadBroadcast } as unknown as RoomsService });
+    const request = { idempotencyKey: "key", body: "hello", channelIds: ["alpha"], attachmentReferences: ["attachment:a"] };
+
+    await expect(handler.leadBroadcast!(request)).resolves.toEqual({ idempotencyKey: "key", results: [{ channelId: "alpha", status: "sent" }] });
+    expect(leadBroadcast).toHaveBeenCalledWith(request);
+  });
 });

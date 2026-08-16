@@ -51,7 +51,7 @@ describe("Rooms protobuf client contract", () => {
     expect(protoMethods).toEqual(ROOMS_PROTO_METHODS);
     expect(interfaceMethods(typescript, "RoomsProtoService")).toEqual(ROOMS_PROTO_METHODS);
     expect(interfaceMethods(typescript, "RoomsLocalServiceExtensions")).toEqual(ROOMS_LOCAL_EXTENSION_METHODS);
-    expect(new Set([...ROOMS_PROTO_METHODS, ...ROOMS_LOCAL_EXTENSION_METHODS]).size).toBe(67);
+    expect(new Set([...ROOMS_PROTO_METHODS, ...ROOMS_LOCAL_EXTENSION_METHODS]).size).toBe(77);
   });
 
   it("pins the GetEvents wire tags and TypeScript fields", () => {
@@ -76,6 +76,15 @@ describe("Rooms protobuf client contract", () => {
     expect(protoMessageFields(proto, "SendRequest")).toEqual({ context: 1, channel_id: 2, body: 3, target: 4, correlation: 5, reply_to_event_id: 6 });
     expect(interfaceFields(typescript, "SendRequest")).toEqual(["context", "channelId", "body", "target", "correlation", "replyToEventId"]);
     expect(protoMessageFields(proto, "Message")).toMatchObject({ reply_to_event_id: 11, thread_root_event_id: 12 });
+  });
+
+  it("pins the Search wire tags, including the channel hit surface", () => {
+    expect(protoMessageFields(proto, "SearchRequest")).toEqual({ context: 1, query: 2, scope: 3, channel_id: 4, limit: 5, include_control: 6, include_channel_digests: 7, active_only: 8, include_events: 9 });
+    expect(interfaceFields(typescript, "SearchRequest")).toEqual(["context", "query", "scope", "channelId", "limit", "includeControl", "includeChannelDigests", "activeOnly", "includeEvents"]);
+    expect(protoMessageFields(proto, "SearchResponse")).toEqual({ events: 1, channels: 2 });
+    expect(interfaceFields(typescript, "SearchResponse")).toEqual(["events", "channels"]);
+    expect(protoMessageFields(proto, "ChannelSearchHit")).toEqual({ channel_id: 1, label: 2, lifecycle_state: 3, message_matches: 4, control_matches: 5, matched_in: 6, last_match_at: 7, last_activity_at: 8, excerpt: 9 });
+    expect(interfaceFields(typescript, "ChannelSearchHit")).toEqual(["channelId", "label", "lifecycleState", "messageMatches", "controlMatches", "matchedIn", "lastMatchAt", "lastActivityAt", "excerpt"]);
   });
 
   it("pins canonical thread lifecycle fields and methods", () => {

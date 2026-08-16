@@ -6,6 +6,8 @@
  * and role mutation are explicit implementation extensions; they are not
  * protobuf RPCs. Transport bindings and serialization stay in their adapters.
  */
+import type { ChannelProfileRevision, SessionProfileBinding } from "../../../profiles/contracts.js";
+import type { ChannelProfileDraft, ProfileSkillCatalogEntry } from "../../../profiles/channel-profile-api.js";
 
 export const ROOMS_PROTO_PACKAGE = "rooms.v1" as const;
 export const ROOMS_PROTO_VERSION = 1 as const;
@@ -26,7 +28,7 @@ export type SessionRole = "operator" | "planner" | "worker" | "reviewer";
 export interface Timestamp { seconds: bigint; nanos: number }
 export interface RequestContext { protocolVersion: number; credential?: string; requestId?: string }
 export interface Channel { id: string; registeredAt?: Timestamp; ownerOperatorSessionId?: string; lifecycleState: ChannelLifecycleState; closedAt?: Timestamp; label?: string; broadcastPolicy?: string }
-export interface Session { id: string; registeredAt?: Timestamp; endedAt?: Timestamp; displayName?: string; role?: string; providerThreadId?: string }
+export interface Session { id: string; registeredAt?: Timestamp; endedAt?: Timestamp; displayName?: string; role?: string; providerThreadId?: string; externalOwner?: string | null; externalAgentId?: string | null }
 export interface Membership { channelId: string; sessionId: string; joinedAt?: Timestamp; role?: string }
 export interface MembershipHistory { channelId: string; sessionId: string; joinedAt?: Timestamp; leftAt?: Timestamp; sessionEndedAt?: Timestamp; role?: string }
 export interface RosterEntry { sessionId: string; displayName?: string; joinedAt?: Timestamp; role?: string }
@@ -55,7 +57,7 @@ export interface GetControlsRequest { context?: RequestContext; channelId: strin
 export interface ReplaceSessionRequest { context?: RequestContext; channelId: string; sessionId: string; replacementSessionId: string; authorizedBySessionId: string; reason?: string }
 export interface SendRequest { context?: RequestContext; channelId?: string; body: string; target: MessageTarget; correlation?: Correlation; replyToEventId?: string | null }
 export interface AuthenticateRequest { context?: RequestContext; credential: string }
-export interface IssueCredentialRequest { context?: RequestContext; sessionId: string }
+export interface IssueCredentialRequest { context?: RequestContext; sessionId: string; proof: string }
 export interface GetSessionsRequest { context?: RequestContext }
 export interface GetRosterRequest { context?: RequestContext; channelId: string }
 export interface GetMembershipHistoryRequest { context?: RequestContext; channelId: string }
@@ -63,7 +65,7 @@ export interface GetSnapshotRequest { context?: RequestContext; channelId: strin
 export interface GetEventsRequest { context?: RequestContext; channelId?: string; afterCursor?: string; afterEventId?: string; sessionId?: string; limit?: number; eventId?: string; replyToEventId?: string }
 export interface GetThreadLifecycleRequest { context?: RequestContext; threadRootEventId: string; channelId?: string }
 export interface ThreadLifecycleMutationRequest { context?: RequestContext; threadRootEventId: string; channelId?: string }
-export interface SearchRequest { context?: RequestContext; query: string; scope: SearchScopeKind; channelId?: string; limit: number }
+export interface SearchRequest { context?: RequestContext; query: string; scope: SearchScopeKind; channelId?: string; limit: number; includeControl?: boolean; includeChannelDigests?: boolean; activeOnly?: boolean; includeEvents?: boolean }
 export interface GetRecipientsRequest { context?: RequestContext; eventId: string }
 export interface WatchRequest { context?: RequestContext; channelId: string; afterCursor?: string; acknowledgedCursor?: string }
 export interface StatusRequest { context?: RequestContext }
@@ -76,7 +78,7 @@ export interface RuntimeRecord { runtimeId: string; homeAuthorityId: string; ses
 export interface RuntimeBindingRecord { bindingId: string; runtimeId: string; sessionId: string; generation: number; channelId?: string | null; adapterKind: string; handleRef: string; boundAt: string; unboundAt?: string | null }
 export interface RuntimeAttachmentRecord { attachmentId: string; runtimeId: string; sessionId: string; generation: number; viewerId: string; mode: RuntimeAttachmentMode; outputCursor: string; leaseExpiresAt?: string | null; attachedAt: string; detachedAt?: string | null }
 export interface RuntimeEventRecord { runtimeId: string; generation: number; eventSeq: number; eventId: string; kind: string; outputCursor?: string | null; messageId?: string | null; outcome?: string | null; payload: Record<string, string | number | boolean | null>; occurredAt: string }
-export interface RuntimeCreateRequest { context?: RequestContext; runtimeId?: string; homeAuthorityId: string; sessionId: string; generation?: number; protocolVersion?: number; transportKind?: string; machineId?: string; adapterKind?: string; channelId?: string | null; handleRef?: string; launchPolicyRef?: string | null; stateDir?: string; shell?: string; command?: string[]; cwd?: string; providerThreadId?: string | null }
+export interface RuntimeCreateRequest { context?: RequestContext; runtimeId?: string; homeAuthorityId: string; sessionId: string; generation?: number; protocolVersion?: number; transportKind?: string; machineId?: string; adapterKind?: string; channelId?: string | null; handleRef?: string; launchPolicyRef?: string | null; stateDir?: string; shell?: string; command?: string[]; cwd?: string; providerThreadId?: string | null; effectiveHome?: string | null }
 export interface RuntimeListRequest { context?: RequestContext; machineId?: string }
 export interface RuntimeStatusRequest { context?: RequestContext; runtimeId: string }
 export interface RuntimeAttachRequest { context?: RequestContext; runtimeId: string; homeAuthorityId: string; sessionId: string; generation: number; attachmentId?: string; viewerId: string; mode: RuntimeAttachmentMode; leaseExpiresAt?: string | null; outputCursor?: string; stateDir?: string; operatorOverride?: boolean }
@@ -112,6 +114,7 @@ export interface ProviderModelCatalogEntry { id: string; label: string; aliases:
 export interface ProviderModelCatalog { version: string; provider: "codex" | "claude"; sourceUrl: string; verifiedAt: string; state: "fresh" | "stale"; models: ProviderModelCatalogEntry[] }
 export interface LocalProviderRegistryResponse { providers: LocalProviderRegistration[] }
 export interface ListProvidersRequest { context?: RequestContext }
+export interface ListChannelProfileRevisionsRequest { context?: RequestContext; channelId: string }
 export interface LocalProviderWriteRequest {
   context?: RequestContext;
   mode: "register" | "update";
@@ -131,13 +134,14 @@ export interface RegisterChannelSessionRequest {
   role: SessionRole;
   externalId?: string | null;
   deliveryMode?: "runtime" | "log";
+  externalOwner?: string | null;
+  externalAgentId?: string | null;
 }
 export interface RegisterChannelSessionResponse { session?: Session; membership?: Membership; idempotent: boolean }
 export interface LaunchSessionRequest {
   context?: RequestContext;
   channelId: string;
   sessionId: string;
-  displayName?: string | null;
   provider: LocalProviderName;
   role: Exclude<SessionRole, "operator">;
   prompt: string;
@@ -145,6 +149,8 @@ export interface LaunchSessionRequest {
   launchOptions?: Record<string, unknown>;
   providerArguments?: string[];
   promptTimeoutMs?: number;
+  externalOwner?: string | null;
+  externalAgentId?: string | null;
 }
 export interface LaunchSessionResponse {
   session?: Session;
@@ -154,10 +160,40 @@ export interface LaunchSessionResponse {
   promptDeliveryAttempts: number;
   providerReady?: { settled: boolean; byteCount: number; cursor: string } | null;
 }
+export interface CreateChannelProfileRevisionRequest { context?: RequestContext; channelId: string; name: string; draft: ChannelProfileDraft }
+export interface ReadChannelProfileRevisionRequest { context?: RequestContext; channelId: string; revisionId: string }
+export interface ListProfileSkillCatalogRequest { context?: RequestContext }
+export interface GetSessionProfileBindingsRequest { context?: RequestContext; channelId: string; sessionId: string }
+export interface LaunchSessionWithProfileRequest extends LaunchSessionRequest { profileRevisionId: string; modelSkillSetId: string }
+export interface ChannelProfileRevisionResponse { profile: ChannelProfileRevision }
+export interface ChannelProfileRevisionSummary {
+  id: string;
+  name: string;
+  version: number;
+  sha256: string;
+  createdAt: string;
+  modelSkillSets: readonly { id: string; provider: "codex" | "claude"; model: string }[];
+}
+export interface ChannelProfileRevisionsResponse { revisions: readonly ChannelProfileRevisionSummary[] }
+export interface ProfileSkillCatalogResponse { skills: readonly ProfileSkillCatalogEntry[] }
+export interface SessionProfileBindingsResponse { bindings: readonly SessionProfileBinding[] }
 export interface InspectSessionRequest { context?: RequestContext; sessionId: string }
 export interface InspectSessionResponse { session?: Session; memberships: MembershipHistory[]; runtime?: Record<string, unknown> | null }
 export interface EndManagedSessionRequest { context?: RequestContext; sessionId: string }
+export interface ListOwnedSessionsRequest { context?: RequestContext; channelId: string; externalOwner: string }
+export interface EndOwnedSessionsRequest { context?: RequestContext; channelId: string; externalOwner: string; sessionIds?: string[] }
 export interface LocalSendMessageRequest { context?: RequestContext; channelId: string; targetSessionId?: string | null; body: string; replyToEventId?: string }
+export interface UpdateChannelCoordinationPolicyRequest { context?: RequestContext; channelId: string; coordinationPolicy: string }
+export interface LeadBroadcastRequest { context?: RequestContext; idempotencyKey: string; body: string; channelIds: string[]; attachmentReferences?: string[] }
+export interface LeadBroadcastChannelResult {
+  channelId: string;
+  status: "sent" | "unavailable" | "unauthorized" | "failed";
+  leadSessionId?: string;
+  eventId?: string;
+  wasDeduplicated?: boolean;
+  error?: { code: string; message: string };
+}
+export interface LeadBroadcastResponse { idempotencyKey: string; results: LeadBroadcastChannelResult[] }
 export interface ResolveSessionRuntimeRequest { context?: RequestContext; sessionId: string; mode: RuntimeAttachmentMode; outputCursor?: string }
 export interface ResolveSessionRuntimeResponse { runtimeId: string; homeAuthorityId: string; sessionId: string; generation: number; viewerId: string; mode: RuntimeAttachmentMode; outputCursor?: string }
 export interface LocalChannelLifecycleRequest { context?: RequestContext; channelId: string }
@@ -207,7 +243,8 @@ export interface SnapshotResponse { snapshot?: Snapshot }
 export interface EventsResponse { events: Message[]; cursor?: string; oldestCursor?: string; hasMore: boolean }
 export interface ThreadLifecycle { threadRootEventId: string; channelId: string; state: ThreadLifecycleState; resolvedAt?: Timestamp; resolvedBySessionId?: string; reopenedAt?: Timestamp; reopenedBySessionId?: string; updatedAt?: Timestamp }
 export interface ThreadLifecycleResponse { thread?: ThreadLifecycle; cursor?: string }
-export interface SearchResponse { events: Message[] }
+export interface ChannelSearchHit { channelId: string; label?: string; lifecycleState: ChannelLifecycleState; messageMatches: number; controlMatches: number; matchedIn: string[]; lastMatchAt?: Timestamp; lastActivityAt?: Timestamp; excerpt?: string }
+export interface SearchResponse { events: Message[]; channels: ChannelSearchHit[] }
 export interface RecipientsResponse { recipients: Recipient[] }
 export interface StatusResponse { status?: LifecycleStatus }
 export interface SuspendResponse { status?: LifecycleStatus; blueprint?: BlueprintStatus }
@@ -222,7 +259,8 @@ export const ROOMS_PROTO_METHODS = [
 
 export const ROOMS_LOCAL_EXTENSION_METHODS = [
   "updateSessionRole", "commitControl", "getControls", "channelStateSnapshots", "channelControlPages", "usageSeries",
-  "registerChannelSession", "launchSession", "inspectSession", "endManagedSession", "sendMessage", "suspendChannel", "resumeChannel", "archiveChannel",
+  "registerChannelSession", "launchSession", "createChannelProfileRevision", "listChannelProfileRevisions", "readChannelProfileRevision", "listProfileSkillCatalog", "getSessionProfileBindings", "launchSessionWithProfile", "inspectSession",
+  "endManagedSession", "listOwnedSessions", "endOwnedSessions", "sendMessage", "updateChannelCoordinationPolicy", "leadBroadcast", "suspendChannel", "resumeChannel", "archiveChannel",
   "listProviders", "writeProvider", "removeProvider", "resolveSessionRuntime",
   "rotationInspect", "rotationPrepare", "rotationAcknowledge", "rotationCommit", "rotationCancel",
   "runtimeCreate", "runtimeList", "runtimeStatus", "runtimeAttach", "runtimeAttachStream", "runtimeDetach",
@@ -272,9 +310,19 @@ export interface RoomsLocalServiceExtensions {
   usageSeries(request: UsageSeriesRequest): Promise<unknown>;
   registerChannelSession(request: RegisterChannelSessionRequest): Promise<RegisterChannelSessionResponse>;
   launchSession(request: LaunchSessionRequest): Promise<LaunchSessionResponse>;
+  createChannelProfileRevision(request: CreateChannelProfileRevisionRequest): Promise<ChannelProfileRevisionResponse>;
+  listChannelProfileRevisions(request: ListChannelProfileRevisionsRequest): Promise<ChannelProfileRevisionsResponse>;
+  readChannelProfileRevision(request: ReadChannelProfileRevisionRequest): Promise<ChannelProfileRevisionResponse>;
+  listProfileSkillCatalog(request: ListProfileSkillCatalogRequest): Promise<ProfileSkillCatalogResponse>;
+  getSessionProfileBindings(request: GetSessionProfileBindingsRequest): Promise<SessionProfileBindingsResponse>;
+  launchSessionWithProfile(request: LaunchSessionWithProfileRequest): Promise<LaunchSessionResponse>;
   inspectSession(request: InspectSessionRequest): Promise<InspectSessionResponse>;
   endManagedSession(request: EndManagedSessionRequest): Promise<void>;
+  listOwnedSessions(request: ListOwnedSessionsRequest): Promise<unknown>;
+  endOwnedSessions(request: EndOwnedSessionsRequest): Promise<unknown>;
   sendMessage(request: LocalSendMessageRequest): Promise<MessageResponse>;
+  updateChannelCoordinationPolicy(request: UpdateChannelCoordinationPolicyRequest): Promise<ChannelResponse>;
+  leadBroadcast(request: LeadBroadcastRequest): Promise<LeadBroadcastResponse>;
   suspendChannel(request: LocalChannelLifecycleRequest): Promise<unknown>;
   resumeChannel(request: LocalChannelLifecycleRequest): Promise<LocalChannelResumeOutcome[]>;
   archiveChannel(request: LocalChannelArchiveRequest): Promise<LocalChannelArchiveResponse>;

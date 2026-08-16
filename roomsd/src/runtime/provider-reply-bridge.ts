@@ -20,8 +20,18 @@ type JobRow = Readonly<{
   scan_state_json: string;
   created_at: string;
   runtime_provider_thread_id: string | null;
+  runtime_effective_home: string | null;
   runtime_ended_at: string | null;
 }>;
+
+type ReplyPublisher = (input: Readonly<{
+  channelId: string;
+  senderSessionId: string;
+  targetSessionId: string;
+  body: string;
+  replyToEventId: string;
+  correlation: Record<string, string>;
+}>) => Promise<{ event: { id: string } }>;
 
 const POLL_INTERVAL_MS = 500;
 const JOB_BATCH_SIZE = 8;
@@ -42,6 +52,7 @@ export class ProviderReplyBridge {
     private readonly database: RoomsRepository,
     private readonly application: RoomsApplication,
     private readonly homeDirectory?: string,
+    private readonly publishReply?: ReplyPublisher,
   ) {}
 
   start(): void {
@@ -91,12 +102,12 @@ export class ProviderReplyBridge {
   }
 
   /** Synchronous and exported for focused acceptance tests. */
-  tick(): void {
+  async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       const jobs = this.pendingJobs();
-      for (const job of jobs) this.process(job);
+      for (const job of jobs) await this.process(job);
       if (this.hasPendingJobs()) this.schedule(POLL_INTERVAL_MS);
     } catch {
       // A closing daemon can race one unref'ed tick with database shutdown.
@@ -106,7 +117,7 @@ export class ProviderReplyBridge {
     }
   }
 
-  private process(job: JobRow): void {
+  private async process(job: JobRow): Promise<void> {
     if (job.runtime_ended_at !== null) {
       this.finish(job.source_event_id, "failed", null, "runtime-ended-before-provider-reply");
       return;
@@ -127,7 +138,7 @@ export class ProviderReplyBridge {
       providerThreadId,
       state: currentState,
       expectedInput: job.source_body,
-      homeDirectory: this.homeDirectory,
+      homeDirectory: job.runtime_effective_home ?? this.homeDirectory,
     });
     this.database.db.prepare(`UPDATE provider_reply_jobs
       SET provider_thread_id=?, scan_state_json=?, updated_at=?
@@ -149,22 +160,31 @@ export class ProviderReplyBridge {
       return;
     }
     try {
-      const receipt = this.application.commitMessage({
+      const upstreamSessionId = this.upstreamSessionId(job);
+      const correlation = {
+        kind: "providerFinalReply",
+        sourceEventId: job.source_event_id,
+        deduplicationKey: `provider-final:${job.source_event_id}:${job.provider_session_id}`,
+      };
+      const receipt = this.publishReply ? await this.publishReply({
+        channelId: job.channel_id,
+        senderSessionId: job.provider_session_id,
+        targetSessionId: upstreamSessionId,
+        body: observed.text,
+        replyToEventId: job.source_event_id,
+        correlation,
+      }) : this.application.commitMessage({
         channelId: job.channel_id,
         senderSessionId: job.provider_session_id,
         body: observed.text,
         target: {
           kind: "direct",
-          sessionId: job.source_sender_session_id,
-          sessionIds: [job.source_sender_session_id],
+          sessionId: upstreamSessionId,
+          sessionIds: [upstreamSessionId],
         },
         replyToEventId: job.source_event_id,
-        correlation: {
-          kind: "providerFinalReply",
-          sourceEventId: job.source_event_id,
-          deduplicationKey: `provider-final:${job.source_event_id}:${job.provider_session_id}`,
-        },
-        deliveryStatuses: { [job.source_sender_session_id]: "delivered" },
+        correlation,
+        deliveryStatuses: { [upstreamSessionId]: "delivered" },
       });
       const event = receipt.event as { id: string };
       this.finish(job.source_event_id, "published", event.id, "provider-final-answer");
@@ -180,6 +200,7 @@ export class ProviderReplyBridge {
         j.source_sender_session_id, j.provider_session_id,
         j.runtime_id, j.generation, j.adapter_kind, j.provider_thread_id,
         j.scan_state_json, j.created_at, r.provider_thread_id AS runtime_provider_thread_id,
+        r.effective_home AS runtime_effective_home,
         r.ended_at AS runtime_ended_at
       FROM provider_reply_jobs j
       JOIN runtimes r ON r.runtime_id=j.runtime_id AND r.generation=j.generation
@@ -193,6 +214,7 @@ export class ProviderReplyBridge {
   }
 
   private hasCanonicalReply(job: JobRow): boolean {
+    const upstreamSessionId = this.upstreamSessionId(job);
     return Boolean(this.database.db.prepare(`SELECT 1
       FROM changes
       WHERE kind='message.sent'
@@ -211,8 +233,18 @@ export class ProviderReplyBridge {
         job.source_cursor,
         job.provider_session_id,
         job.source_event_id,
-        job.source_sender_session_id,
+        upstreamSessionId,
       ));
+  }
+
+  private upstreamSessionId(job: JobRow): string {
+    const channel = this.database.currentChannel(job.channel_id);
+    const providerRole = this.database.sessionRoleValue(job.provider_session_id);
+    if (channel?.coordinationPolicy !== "lead-upstream" || providerRole !== "worker") return job.source_sender_session_id;
+    const planners = this.database.roster(job.channel_id).filter((member: any) => member.role === "planner") as Array<{ sessionId: string }>;
+    const upstreamSessionId = planners.length === 1 ? planners[0].sessionId : channel.ownerOperatorSessionId;
+    if (!upstreamSessionId) throw new Error("upstreamUnavailable");
+    return upstreamSessionId;
   }
 
   private finish(sourceEventId: string, state: "published" | "skipped" | "failed", replyEventId: string | null, reason: string): void {
@@ -226,7 +258,7 @@ export class ProviderReplyBridge {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.tick();
+      void this.tick();
     }, delayMs);
     this.timer.unref();
   }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import type { RoomsCLIBackend } from "../src/cli/backend.js";
 import { runRoomsCLI } from "../src/cli/main.js";
 import { createDefaultRoomsCLIBackend } from "../src/cli/default-backend.js";
@@ -10,6 +11,7 @@ import { setupMachineIdentity } from "../src/identity/machine-identity.js";
 import { bindRoomsService } from "../src/transports/unix/index.js";
 import { roomsPaths } from "../src/provisioning/paths.js";
 import { RoomsRepository } from "../src/storage/repository.js";
+import { RuntimeRepository } from "../src/storage/runtime-repository.js";
 
 function unused(): never {
   throw new Error("unused");
@@ -21,18 +23,24 @@ function unused(): never {
  * native composition on a temporary state dir instead of touching the
  * developer's live daemon.
  */
-async function withTemporaryRoomsDaemon(prefix: string, seed: (store: RoomsRepository) => void, run: () => Promise<void>): Promise<void> {
+async function withTemporaryRoomsDaemon(prefix: string, seed: (store: RoomsRepository) => void, run: () => Promise<void>, authenticatedSessionId?: string): Promise<void> {
   const stateDir = mkdtempSync(join(tmpdir(), prefix));
   const paths = roomsPaths(stateDir);
   const previous = {
     stateDir: process.env.ROOMS_STATE_DIR,
     storePath: process.env.ROOMS_STORE_PATH,
     daemonStorePath: process.env.ROOMSD_STORE_PATH,
+    sessionProof: process.env.ROOMS_SESSION_PROOF,
   };
   setupMachineIdentity(stateDir);
   const seedStore = new RoomsRepository(paths.storePath);
   try { seed(seedStore); } finally { seedStore.close(); }
   const composition = createNativeComposition(paths.storePath, undefined, stateDir);
+  if (authenticatedSessionId) {
+    const proof = randomBytes(32);
+    new RuntimeRepository(composition.database.db).create({ runtimeId: `runtime-${authenticatedSessionId}`, homeAuthorityId: "test-authority", sessionId: authenticatedSessionId, generation: 1, protocolVersion: 1, transportKind: "localPty", machineId: "test-machine", reconnectSecret: randomBytes(32), sessionProof: proof });
+    process.env.ROOMS_SESSION_PROOF = proof.toString("base64url");
+  }
   const server = await bindRoomsService(composition.handler, { kind: "unix", path: paths.endpoint });
   try {
     process.env.ROOMS_STATE_DIR = stateDir;
@@ -43,6 +51,7 @@ async function withTemporaryRoomsDaemon(prefix: string, seed: (store: RoomsRepos
     if (previous.stateDir === undefined) delete process.env.ROOMS_STATE_DIR; else process.env.ROOMS_STATE_DIR = previous.stateDir;
     if (previous.storePath === undefined) delete process.env.ROOMS_STORE_PATH; else process.env.ROOMS_STORE_PATH = previous.storePath;
     if (previous.daemonStorePath === undefined) delete process.env.ROOMSD_STORE_PATH; else process.env.ROOMSD_STORE_PATH = previous.daemonStorePath;
+    if (previous.sessionProof === undefined) delete process.env.ROOMS_SESSION_PROOF; else process.env.ROOMS_SESSION_PROOF = previous.sessionProof;
     await server.close();
     composition.database.close();
     rmSync(stateDir, { recursive: true, force: true });
@@ -73,7 +82,7 @@ describe("rooms channel close", () => {
       const payload = JSON.parse(output) as { channel: { id: string; lifecycleState: string; closedAt: string | null } };
       expect(payload.channel).toMatchObject({ id: "stale", lifecycleState: "closed" });
       expect(payload.channel.closedAt).not.toBeNull();
-    });
+    }, "operator");
   });
 
   it("lets the owning operator close their channel", async () => {
@@ -84,7 +93,7 @@ describe("rooms channel close", () => {
       const output = await runRoomsCLI(["channel", "close", "mine", "--credential", "operator"], createDefaultRoomsCLIBackend());
       const payload = JSON.parse(output) as { channel: { lifecycleState: string } };
       expect(payload.channel.lifecycleState).toBe("closed");
-    });
+    }, "operator");
   });
 
   it("rejects closing a channel owned by another operator", async () => {
@@ -94,7 +103,7 @@ describe("rooms channel close", () => {
       store.insertChannel({ id: "guarded", ownerOperatorSessionId: "owner" });
     }, async () => {
       await expect(runRoomsCLI(["channel", "close", "guarded", "--credential", "intruder"], createDefaultRoomsCLIBackend())).rejects.toThrow(/unauthorized/);
-    });
+    }, "intruder");
   });
 
   it("rejects a non-operator credential", async () => {
@@ -104,7 +113,7 @@ describe("rooms channel close", () => {
       store.insertChannel({ id: "stale" });
     }, async () => {
       await expect(runRoomsCLI(["channel", "close", "stale", "--credential", "grunt"], createDefaultRoomsCLIBackend())).rejects.toThrow("channel closure requires an operator credential");
-    });
+    }, "grunt");
   });
 
   it("falls back to ROOMS_SESSION_ID when --credential is omitted", async () => {
@@ -121,7 +130,7 @@ describe("rooms channel close", () => {
       } finally {
         if (previous === undefined) delete process.env.ROOMS_SESSION_ID; else process.env.ROOMS_SESSION_ID = previous;
       }
-    });
+    }, "operator");
   });
 
   it("routes channel close through the CLI backend", async () => {
@@ -162,7 +171,7 @@ describe("rooms channel label", () => {
 
       const cleared = JSON.parse(await runRoomsCLI(["channel", "label", "labeled", "--label", "", "--credential", "operator"], createDefaultRoomsCLIBackend())) as { channel: { label: string | null } };
       expect(cleared.channel.label).toBeNull();
-    });
+    }, "operator");
   });
 
   it("rejects labeling a channel owned by another operator", async () => {
@@ -172,7 +181,7 @@ describe("rooms channel label", () => {
       store.insertChannel({ id: "guarded", ownerOperatorSessionId: "owner" });
     }, async () => {
       await expect(runRoomsCLI(["channel", "label", "guarded", "--label", "Nope", "--credential", "intruder"], createDefaultRoomsCLIBackend())).rejects.toThrow(/unauthorized/);
-    });
+    }, "intruder");
   });
 
   it("routes channel labels through the CLI backend", async () => {

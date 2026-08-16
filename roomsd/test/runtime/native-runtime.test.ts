@@ -10,6 +10,40 @@ import { RuntimeRepository } from "../../src/storage/runtime-repository.js";
 const options = { endpoint: { kind: "unix" as const, path: "rooms.sock" }, databasePath: "/tmp/rooms.db", installSignalHandlers: false };
 
 describe("native Rooms runtime", () => {
+  it("issues a credential only for the matching active runtime possession proof", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-session-proof-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      composition.database.insertSession({ id: "operator", role: "operator" });
+      composition.database.insertSession({ id: "worker", role: "worker" });
+      composition.database.insertSession({ id: "legacy", role: "worker" });
+      const runtimes = new RuntimeRepository(composition.database.db);
+      const operatorProof = Buffer.alloc(32, 1);
+      const workerProof = Buffer.alloc(32, 2);
+      for (const [runtimeId, sessionId, proof] of [["runtime-operator", "operator", operatorProof], ["runtime-worker", "worker", workerProof]] as const) {
+        runtimes.create({ runtimeId, homeAuthorityId: "authority-local", sessionId, generation: 1, protocolVersion: 1, transportKind: "localPty", machineId: "local", reconnectSecret: Buffer.alloc(32, 9), sessionProof: proof });
+        runtimes.markState(runtimeId, 1, "running");
+      }
+      runtimes.create({ runtimeId: "runtime-legacy", homeAuthorityId: "authority-local", sessionId: "legacy", generation: 1, protocolVersion: 1, transportKind: "localPty", machineId: "local", reconnectSecret: Buffer.alloc(32, 8) });
+      runtimes.markState("runtime-legacy", 1, "running");
+      const connection = { credentials: new Map(), onClose: new Set() };
+
+      await expect(composition.handler.issueCredential({ sessionId: "operator", proof: "", __connection: connection } as never)).rejects.toThrow("session possession proof is required");
+      await expect(composition.handler.issueCredential({ sessionId: "operator", proof: workerProof.toString("base64url"), __connection: connection } as never)).rejects.toThrow("session possession proof is required");
+      await expect(composition.handler.issueCredential({ sessionId: "legacy", proof: Buffer.alloc(32, 3).toString("base64url"), __connection: connection } as never)).rejects.toThrow("session possession proof is required");
+      const issued = await composition.handler.issueCredential({ sessionId: "worker", proof: workerProof.toString("base64url"), __connection: connection } as never);
+
+      expect(issued.credential).toMatch(/^rooms_/);
+      await expect(composition.handler.authenticate({ credential: issued.credential, __connection: connection } as never)).resolves.toEqual({ authenticatedSessionId: "worker" });
+      runtimes.markState("runtime-worker", 1, "terminated", "proof");
+      await expect(composition.handler.issueCredential({ sessionId: "worker", proof: workerProof.toString("base64url"), __connection: { credentials: new Map(), onClose: new Set() } } as never)).rejects.toThrow("session possession proof is required");
+      composition.database.close();
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("opens the shared composition, binds the selected endpoint, and exposes health", async () => {
     const database = { close: vi.fn() };
     const handler = {};
@@ -325,6 +359,29 @@ describe("native Rooms runtime", () => {
       // Direct sends stay open to everyone on a privileged channel.
       const direct = await composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "direct", sessionId: "operator" }, body: "status", context: { credential: "credential" }, __connection: connectionFor("worker") } as never) as any;
       expect(direct.event.recipientStatuses.operator).toBe("delivered");
+      composition.database.close();
+    } finally { rmSync(stateDir, { recursive: true, force: true }); }
+  });
+
+  it("routes managed workers to the lead, then falls back to the operator", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rooms-native-coordination-policy-"));
+    try {
+      setupMachineIdentity(stateDir);
+      const composition = createNativeComposition(join(stateDir, "rooms.sqlite"), undefined, stateDir);
+      for (const [id, role] of [["operator", "operator"], ["planner", "planner"], ["worker", "worker"]] as const) {
+        composition.database.insertSession({ id, role, deliveryMode: "log" });
+        if (id === "operator") continue;
+      }
+      composition.database.insertChannel({ id: "proof", ownerOperatorSessionId: "operator" });
+      for (const [id, role] of [["operator", "operator"], ["planner", "planner"], ["worker", "worker"]] as const) composition.database.insertMembership("proof", id, role);
+      const connectionFor = (id: string) => ({ authenticatedSessionId: id, credentials: new Map([["credential", id]]), onClose: new Set() });
+      await composition.handler.updateChannelCoordinationPolicy!({ channelId: "proof", coordinationPolicy: "lead-upstream", context: { credential: "credential" }, __connection: connectionFor("operator") } as never);
+
+      await expect(composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "direct", sessionId: "operator" }, body: "wrong route", context: { credential: "credential" }, __connection: connectionFor("worker") } as never)).rejects.toMatchObject({ code: "upstreamRestricted" });
+      await expect(composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "direct", sessionId: "planner" }, body: "lead update", context: { credential: "credential" }, __connection: connectionFor("worker") } as never)).resolves.toMatchObject({ event: { target: { sessionId: "planner" } } });
+
+      composition.database.leaveMembership("proof", "planner");
+      await expect(composition.handler.send({ senderSessionId: "worker", channelId: "proof", target: { kind: "direct", sessionId: "operator" }, body: "fallback update", context: { credential: "credential" }, __connection: connectionFor("worker") } as never)).resolves.toMatchObject({ event: { target: { sessionId: "operator" } } });
       composition.database.close();
     } finally { rmSync(stateDir, { recursive: true, force: true }); }
   });

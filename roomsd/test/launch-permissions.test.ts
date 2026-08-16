@@ -4,15 +4,15 @@ import { argsAlreadySetPermissions, launchPermissionArguments, parseLaunchPermis
 describe("unattended launch permission handling", () => {
   it("gives every provider a way to answer its own permission prompts", () => {
     expect(launchPermissionArguments("claude", [], "headless")).toEqual(["--dangerously-skip-permissions"]);
-    expect(launchPermissionArguments("codex", [], "headless")).toEqual(["--yolo"]);
+    expect(launchPermissionArguments("codex", [], "headless")).toEqual(["--yolo", "--dangerously-bypass-hook-trust"]);
     expect(launchPermissionArguments("grok", [], "headless")).toEqual(["--permission-mode", "bypassPermissions"]);
   });
 
   it("leaves the caller's own permission choice alone", () => {
     expect(launchPermissionArguments("claude", ["--permission-mode", "plan"], "headless")).toEqual([]);
     expect(launchPermissionArguments("claude", ["--dangerously-skip-permissions"], "headless")).toEqual([]);
-    expect(launchPermissionArguments("codex", ["--ask-for-approval", "on-request"], "headless")).toEqual([]);
-    expect(launchPermissionArguments("codex", ["--sandbox=read-only"], "headless")).toEqual([]);
+    expect(launchPermissionArguments("codex", ["--ask-for-approval", "on-request"], "headless")).toEqual(["--dangerously-bypass-hook-trust"]);
+    expect(launchPermissionArguments("codex", ["--sandbox=read-only"], "headless")).toEqual(["--dangerously-bypass-hook-trust"]);
     expect(launchPermissionArguments("grok", ["--always-approve"], "headless")).toEqual([]);
   });
 

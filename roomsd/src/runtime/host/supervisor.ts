@@ -12,7 +12,7 @@ import { RuntimeHostClient } from "./client.js";
 import { ensureRuntimeSocketDirectory, runtimeSocketPath } from "./endpoint.js";
 
 export type HostSupervisorState = "starting" | "running" | "recovering" | "crashed" | "terminated";
-export interface RuntimeHostSpec { sessionId: string; channelId?: string | null; runtimeId: string; homeAuthorityId: string; generation: number; stateDir: string; socketPath?: string; executable?: string; shell?: string; command?: readonly string[]; cwd?: string; ringBytes?: number; secret?: Uint8Array; capabilityRenewal?: boolean; }
+export interface RuntimeHostSpec { sessionId: string; channelId?: string | null; runtimeId: string; homeAuthorityId: string; generation: number; stateDir: string; socketPath?: string; executable?: string; shell?: string; command?: readonly string[]; cwd?: string; ringBytes?: number; secret?: Uint8Array; sessionProof?: Uint8Array; capabilityRenewal?: boolean; }
 
 /** Rooms owns host process lifecycle; reconnect never starts a replacement host. */
 export class RuntimeHostSupervisor extends EventEmitter {
@@ -117,7 +117,7 @@ export class RuntimeHostSupervisor extends EventEmitter {
       child.once("exit", (code, signal) => { if (code !== null || signal) reject(new Error("runtime host exited during enrollment")); });
     });
     try {
-      enrollment.write(encodeEnrollment({ sessionId: this.spec.sessionId, channelId: this.spec.channelId, runtimeId: this.spec.runtimeId, homeAuthorityId: this.spec.homeAuthorityId, generation: this.spec.generation, protocolVersion: 1, expiresAt: Math.floor(Date.now() / 1000) + 86400, reconnectSecret: this.secret, statePath, socketPath, ringBytes: this.spec.ringBytes ?? 262144, command: this.spec.command, cwd: this.spec.cwd }));
+      enrollment.write(encodeEnrollment({ sessionId: this.spec.sessionId, channelId: this.spec.channelId, runtimeId: this.spec.runtimeId, homeAuthorityId: this.spec.homeAuthorityId, generation: this.spec.generation, protocolVersion: 1, expiresAt: Math.floor(Date.now() / 1000) + 86400, reconnectSecret: this.secret, sessionProof: this.spec.sessionProof, statePath, socketPath, ringBytes: this.spec.ringBytes ?? 262144, command: this.spec.command, cwd: this.spec.cwd }));
     } catch (error) {
       throw this.hostFailure(error);
     }

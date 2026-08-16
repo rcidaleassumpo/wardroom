@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import type { RoomsCLIBackend } from "../cli/backend.js";
 
-export const ROOMS_MCP_TOOL_NAMES = ["join", "roster", "send", "inbox"] as const;
+export const ROOMS_MCP_TOOL_NAMES = ["join", "roster", "send", "inbox", "search"] as const;
 
 const nonEmpty = z.string().trim().min(1);
 const optionalSession = nonEmpty.optional().describe("Rooms session ID. Defaults to ROOMS_SESSION_ID when that environment variable is set.");
@@ -34,6 +34,16 @@ const inboxInput = z.object({
   limit: z.number().int().min(1).max(500).default(100).describe("Maximum number of events to return."),
 });
 
+const searchInput = z.object({
+  query: nonEmpty.describe("Literal text to find. Wildcards are not supported; the query is matched as written."),
+  channel: nonEmpty.optional().describe("Restrict the search to one channel. Omit to search every stored channel."),
+  limit: z.number().int().min(1).max(500).default(20).describe("Maximum number of channel hits and message events to return."),
+  channel_digests: z.boolean().default(true).describe("Return one hit per matching channel with counts, recency, and an excerpt."),
+  include_events: z.boolean().default(true).describe("Return the matching message events themselves."),
+  include_control: z.boolean().default(true).describe("Also match committed control payloads, such as a task title."),
+  active_only: z.boolean().default(false).describe("Skip closed channels."),
+});
+
 export function createRoomsMcpServer(
   backend: RoomsCLIBackend,
   environment: NodeJS.ProcessEnv = process.env,
@@ -42,7 +52,7 @@ export function createRoomsMcpServer(
   const server = new McpServer(
     { name: "rooms", version: "0.1.0" },
     {
-      instructions: "Use join to register one log-delivered Rooms session, then use roster, send, and inbox against canonical Rooms state. MCP participation is agent-initiated and does not wake a stopped provider runtime.",
+      instructions: "Use join to register one log-delivered Rooms session, then use roster, send, inbox, and search against canonical Rooms state. MCP participation is agent-initiated and does not wake a stopped provider runtime.",
     },
   );
 
@@ -114,6 +124,28 @@ export function createRoomsMcpServer(
         since: cursor,
         channel: channel ?? null,
         limit,
+      });
+    }),
+  );
+
+  server.registerTool(
+    "search",
+    {
+      title: "Search Rooms channels and messages",
+      description: "Find the channels and messages that mention one text, newest match first. Use this to recover a channel you know only by what happened in it.",
+      inputSchema: searchInput,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ query, channel, limit, channel_digests, include_events, include_control, active_only }) => toolResult(async () => {
+      if (!backend.search) throw new Error("Rooms search is unavailable");
+      return backend.search({
+        query,
+        channel: channel ?? null,
+        limit,
+        channelDigests: channel_digests,
+        events: include_events,
+        includeControl: include_control,
+        activeOnly: active_only,
       });
     }),
   );

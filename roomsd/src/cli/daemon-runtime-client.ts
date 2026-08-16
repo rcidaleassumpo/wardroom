@@ -2,12 +2,14 @@
 import { lstatSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { ROOMS_PROTOCOL_MAX_VERSION } from "../api/protocol-compatibility.js";
+import { readSessionBootstrap } from "../credentials/session-proof-bootstrap.js";
+import { readOperatorCredentialSecret } from "../credentials/operator-credential.js";
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 /** Bounded request/response client for the private local roomsd Unix endpoint. */
 export class RoomsDaemonRuntimeClient {
-  constructor(private readonly endpoint: string, private readonly unavailableReason?: () => string) {}
+  constructor(private readonly endpoint: string, private readonly unavailableReason?: () => string, private readonly stateDir?: string) {}
 
   async call(method: string, request: object): Promise<unknown> {
     const socket = await this.connect();
@@ -18,7 +20,7 @@ export class RoomsDaemonRuntimeClient {
   async callAs(sessionId: string, method: string, request: object): Promise<unknown> {
     const socket = await this.connect();
     try {
-      const credential = await authenticate(socket, sessionId);
+      const credential = await authenticate(socket, sessionId, this.stateDir);
       return await call(socket, method, withProtocolContext(request, credential));
     } finally { socket.destroy(); }
   }
@@ -35,7 +37,7 @@ export class RoomsDaemonRuntimeClient {
     detach(): Promise<unknown>;
   }>> {
     const socket = await this.connect();
-    const credential = await authenticate(socket, sessionId);
+    const credential = await authenticate(socket, sessionId, this.stateDir);
     // Request setup is bounded, but an interactive terminal is intentionally
     // long-lived and may be idle. Heartbeat/lifecycle checks own liveness.
     socket.setTimeout(0);
@@ -108,8 +110,16 @@ export class RoomsDaemonRuntimeClient {
   }
 }
 
-async function authenticate(socket: Socket, sessionId: string): Promise<string> {
-  const credentialResponse = await call(socket, "issueCredential", withProtocolContext({ sessionId })) as { credential?: string };
+async function authenticate(socket: Socket, sessionId: string, stateDir?: string): Promise<string> {
+  const runtimeProof = String(process.env.ROOMS_SESSION_PROOF ?? "").trim();
+  // A durable operator credential lets a trusted local operator client
+  // authenticate after a daemon restart without a launched runtime. The daemon
+  // accepts it as a possession proof for that operator session only.
+  const operatorProof = !runtimeProof && stateDir ? readOperatorCredentialSecret(stateDir, sessionId) : null;
+  const proof = runtimeProof || operatorProof || "";
+  const bootstrap = !proof && stateDir ? readSessionBootstrap(stateDir, sessionId) : null;
+  if (!proof && !bootstrap) throw new Error("Rooms session possession proof is unavailable; launch or resume this session through Rooms");
+  const credentialResponse = await call(socket, proof ? "issueCredential" : "issueBootstrapCredential", withProtocolContext(proof ? { sessionId, proof } : { sessionId, bootstrap })) as { credential?: string };
   if (!credentialResponse.credential) throw new Error("roomsd did not issue a runtime credential");
   await call(socket, "authenticate", withProtocolContext({ credential: credentialResponse.credential }));
   return credentialResponse.credential;

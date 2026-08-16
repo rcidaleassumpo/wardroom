@@ -316,7 +316,24 @@ const steps: readonly MigrationStep[] = [{ version: 1, apply: (db) => db.exec(`C
 `) },
   { version: 23, apply: (db) => {
       if (columnMissing(db, "runtimes", "effective_cwd")) db.exec(`ALTER TABLE runtimes ADD COLUMN effective_cwd TEXT;`);
-     } }];
+     } },
+  { version: 24, apply: (db) => {
+    if (columnMissing(db, "sessions", "external_owner")) db.exec("ALTER TABLE sessions ADD COLUMN external_owner TEXT;");
+    if (columnMissing(db, "sessions", "external_agent_id")) db.exec("ALTER TABLE sessions ADD COLUMN external_agent_id TEXT;");
+    if (columnMissing(db, "runtimes", "external_owner")) db.exec("ALTER TABLE runtimes ADD COLUMN external_owner TEXT;");
+    if (columnMissing(db, "runtimes", "external_agent_id")) db.exec("ALTER TABLE runtimes ADD COLUMN external_agent_id TEXT;");
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'").get()) db.exec("CREATE INDEX IF NOT EXISTS sessions_external_owner ON sessions(external_owner, external_agent_id);");
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtimes'").get()) db.exec("CREATE INDEX IF NOT EXISTS runtimes_external_owner ON runtimes(external_owner, external_agent_id);");
+  } },
+  { version: 25, apply: (db) => {
+    if (columnMissing(db, "runtimes", "session_proof_hash")) db.exec("ALTER TABLE runtimes ADD COLUMN session_proof_hash TEXT;");
+  } },
+  { version: 26, apply: (db) => {
+    if (columnMissing(db, "channels", "coordination_policy")) db.exec("ALTER TABLE channels ADD COLUMN coordination_policy TEXT NOT NULL DEFAULT 'open' CHECK (coordination_policy IN ('open','lead-upstream')); ");
+  } },
+  { version: 27, apply: (db) => {
+    if (columnMissing(db, "runtimes", "effective_home")) db.exec("ALTER TABLE runtimes ADD COLUMN effective_home TEXT;");
+  } }];
 function columnMissing(db: DatabaseSync, table: string, column: string): boolean {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) return false;
   return !db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name=?`).get(column);

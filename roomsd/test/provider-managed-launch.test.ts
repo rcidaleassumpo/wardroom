@@ -16,9 +16,14 @@ describe("managed provider launch", () => {
     });
   });
 
-  it("keeps other provider launches on the PTY delivery path", () => {
+  it("preloads Codex's first prompt through its positional prompt argument", () => {
     expect(prepareManagedProviderLaunch({ adapterKind: "codex", arguments: ["--yolo"], prompt: "prompt" }))
-      .toEqual({ arguments: ["--yolo"], providerThreadId: null, promptPreloaded: false });
+      .toEqual({ arguments: ["--yolo", "prompt"], providerThreadId: null, promptPreloaded: true });
+  });
+
+  it("keeps providers without a managed prompt argument on the PTY delivery path", () => {
+    expect(prepareManagedProviderLaunch({ adapterKind: "claude", arguments: ["--dangerously-skip-permissions"], prompt: "prompt" }))
+      .toEqual({ arguments: ["--dangerously-skip-permissions"], providerThreadId: null, promptPreloaded: false });
   });
 
   it("rejects caller-owned Gemini identity and initial-prompt flags", () => {

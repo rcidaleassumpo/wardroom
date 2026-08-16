@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CanonicalMessageCommitInput, Channel, ChannelBroadcastPolicy, MutationReceipt, Session, SessionRole } from "./contracts.js";
+import type { CanonicalMessageCommitInput, Channel, ChannelBroadcastPolicy, ChannelCoordinationPolicy, MutationReceipt, Session, SessionRole } from "./contracts.js";
 import { RoomsCommandError } from "./contracts.js";
 
 export interface AuthenticatedCommandContext { credentialId: string; actorSessionId: string; role: SessionRole }
@@ -15,6 +15,7 @@ export interface DomainRepository {
   closeChannel(channelId: string): MutationReceipt;
   updateChannelLabel(channelId: string, label: string | null): MutationReceipt;
   updateChannelBroadcastPolicy(channelId: string, policy: ChannelBroadcastPolicy): MutationReceipt;
+  updateChannelCoordinationPolicy(channelId: string, policy: ChannelCoordinationPolicy): MutationReceipt;
   sessionRoleValue(id: string): SessionRole | null;
   isActiveMember(channelId: string, sessionId: string, role?: SessionRole): boolean;
   activeMembershipCount(channelId: string, role: SessionRole): number;
@@ -64,7 +65,24 @@ export class RoomsApplication {
     return this.store.command((store) => {
       const actor = store.currentSession(context.actorSessionId);
       if (!actor || actor.endedAt || actor.role !== context.role) throw new RoomsCommandError("unauthorized");
-      if (context.actorSessionId === sessionId || context.role === "operator") {
+      if (context.actorSessionId === sessionId) return store.markSessionEnded(sessionId);
+      // An operator ends its own sessions and the members of channels it takes
+      // part in. Reaching into an unrelated operator's channel is not operator
+      // authority, and a client that guesses which sessions are stale must not
+      // be able to end another operator's live agent.
+      if (context.role === "operator") {
+        const target = store.currentSession(sessionId);
+        if (!target) throw new RoomsCommandError("unknownSession");
+        if (target.externalOwner === context.actorSessionId) return store.markSessionEnded(sessionId);
+        const targetChannels = store.activeMembershipChannels(sessionId);
+        // A session with no active membership belongs to no channel, so no
+        // other operator's channel is affected by its cleanup.
+        if (targetChannels.length === 0) return store.markSessionEnded(sessionId);
+        const shared = targetChannels.some((channelId) =>
+          store.currentChannel(channelId)?.ownerOperatorSessionId === context.actorSessionId
+          || store.isActiveMember(channelId, context.actorSessionId, "operator"),
+        );
+        if (!shared) throw new RoomsCommandError("unauthorized", `operator ${context.actorSessionId} shares no channel with ${sessionId}`);
         return store.markSessionEnded(sessionId);
       }
       // Channel planners may end workers they supervise so failed planner-
@@ -118,6 +136,18 @@ export class RoomsApplication {
       if (!channel) throw new RoomsCommandError("unknownChannel");
       if (policy !== "all" && policy !== "privileged") throw new RoomsCommandError("invalidBroadcastPolicy", "broadcast policy must be all or privileged");
       return store.updateChannelBroadcastPolicy(channelId, policy);
+    });
+  }
+  setChannelCoordinationPolicy(channelId: string, policy: ChannelCoordinationPolicy, context: AuthenticatedCommandContext) {
+    return this.store.command((store) => {
+      const actor = store.currentSession(context.actorSessionId);
+      const channel = store.currentChannel(channelId);
+      const ownedByAnotherOperator = channel !== null && channel.ownerOperatorSessionId !== null && channel.ownerOperatorSessionId !== actor?.id;
+      const activeOperatorMember = channel !== null && store.isActiveMember(channelId, context.actorSessionId, "operator");
+      if (!actor || actor.endedAt || actor.role !== "operator" || context.role !== "operator" || (ownedByAnotherOperator && !activeOperatorMember)) throw new RoomsCommandError("unauthorized");
+      if (!channel) throw new RoomsCommandError("unknownChannel");
+      if (policy !== "open" && policy !== "lead-upstream") throw new RoomsCommandError("invalidCoordinationPolicy");
+      return store.updateChannelCoordinationPolicy(channelId, policy);
     });
   }
   commitMessage(input: CanonicalMessageCommitInput) {

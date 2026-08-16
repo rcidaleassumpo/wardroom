@@ -55,6 +55,12 @@ func TestHelloRenewsCapabilityOnSameConnection(t *testing.T) {
 	assertHandleFrame(t, state, host, peer, 1, TPing, nil, TPong)
 }
 
+func TestSessionProofEnvironmentUsesUnpaddedURLSafeEncoding(t *testing.T) {
+	if got, want := sessionProofEnvironment([]byte{0xfb, 0xff, 0xef, 0x00}), "-__vAA"; got != want {
+		t.Fatalf("session proof = %q, want %q", got, want)
+	}
+}
+
 func helloPayload(t *testing.T, secret []byte, expiry int64, id string) []byte {
 	t.Helper()
 	payload, err := json.Marshal(helloEnvelope{

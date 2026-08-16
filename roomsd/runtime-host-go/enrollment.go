@@ -27,6 +27,7 @@ type enrollment struct {
 	ProtocolVersion uint16   `json:"protocolVersion"`
 	ExpiresAt       int64    `json:"expiresAt"`
 	ReconnectSecret string   `json:"reconnectSecret"`
+	SessionProof    string   `json:"sessionProof"`
 	StatePath       string   `json:"statePath"`
 	SocketPath      string   `json:"socketPath"`
 	RingBytes       int      `json:"ringBytes"`
@@ -45,6 +46,7 @@ type enrollmentState struct {
 	SecretHash        string `json:"secretHash"`
 	Correlation       string `json:"correlation"`
 	ReconnectSecret   string `json:"reconnectSecret"`
+	SessionProof      string `json:"sessionProof"`
 	CapabilityRenewal bool   `json:"capabilityRenewal"`
 }
 
@@ -78,6 +80,10 @@ func parseEnrollment(payload []byte) (enrollment, []byte, error) {
 	secret, err := base64.RawStdEncoding.DecodeString(e.ReconnectSecret)
 	if err != nil || len(secret) < 32 || len(secret) > 256 {
 		return enrollment{}, nil, errors.New("invalid reconnect secret")
+	}
+	proof, err := base64.RawStdEncoding.DecodeString(e.SessionProof)
+	if err != nil || len(proof) < 32 || len(proof) > 256 {
+		return enrollment{}, nil, errors.New("invalid session proof")
 	}
 	return e, secret, nil
 }
@@ -122,7 +128,7 @@ func persistEnrollmentState(e enrollment, secret []byte) error {
 		return errors.New("state file mode")
 	}
 	hash := sha256.Sum256(secret)
-	s := enrollmentState{Version: e.Version, SessionID: e.SessionID, RuntimeID: e.RuntimeID, HomeAuthorityID: e.HomeAuthorityID, Generation: e.Generation, ProtocolVersion: e.ProtocolVersion, ExpiresAt: e.ExpiresAt, SecretHash: fmt.Sprintf("sha256:%x", hash[:]), Correlation: e.RuntimeID + ":" + fmt.Sprint(e.Generation), ReconnectSecret: e.ReconnectSecret, CapabilityRenewal: true}
+	s := enrollmentState{Version: e.Version, SessionID: e.SessionID, RuntimeID: e.RuntimeID, HomeAuthorityID: e.HomeAuthorityID, Generation: e.Generation, ProtocolVersion: e.ProtocolVersion, ExpiresAt: e.ExpiresAt, SecretHash: fmt.Sprintf("sha256:%x", hash[:]), Correlation: e.RuntimeID + ":" + fmt.Sprint(e.Generation), ReconnectSecret: e.ReconnectSecret, SessionProof: e.SessionProof, CapabilityRenewal: true}
 	b, err := json.Marshal(s)
 	if err != nil {
 		return err

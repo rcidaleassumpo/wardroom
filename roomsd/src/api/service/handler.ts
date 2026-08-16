@@ -56,7 +56,11 @@ import type {
   RuntimeEventsResponse,
   ChannelStateSnapshotsRequest, ChannelControlPagesRequest, UsageSeriesRequest,
   RegisterChannelSessionRequest, RegisterChannelSessionResponse, LaunchSessionRequest, LaunchSessionResponse,
-  InspectSessionRequest, InspectSessionResponse, EndManagedSessionRequest, LocalSendMessageRequest, ResolveSessionRuntimeRequest, ResolveSessionRuntimeResponse,
+  CreateChannelProfileRevisionRequest, ListChannelProfileRevisionsRequest, ReadChannelProfileRevisionRequest, ListProfileSkillCatalogRequest,
+  GetSessionProfileBindingsRequest, LaunchSessionWithProfileRequest, ChannelProfileRevisionResponse, ChannelProfileRevisionsResponse,
+  ProfileSkillCatalogResponse, SessionProfileBindingsResponse,
+  InspectSessionRequest, InspectSessionResponse, EndManagedSessionRequest, ListOwnedSessionsRequest, EndOwnedSessionsRequest, LocalSendMessageRequest, UpdateChannelCoordinationPolicyRequest, ResolveSessionRuntimeRequest, ResolveSessionRuntimeResponse,
+  LeadBroadcastRequest, LeadBroadcastResponse,
   LocalChannelLifecycleRequest, LocalChannelArchiveRequest, LocalChannelArchiveResponse, LocalChannelResumeOutcome,
   LocalProviderRegistryResponse, LocalProviderWriteRequest, LocalProviderMutationResponse, LocalProviderRemoveRequest,
   RotationSessionRequest, RotationAcknowledgeRequest, RotationCommitRequest, RotationCancelRequest,
@@ -83,7 +87,8 @@ export interface RoomsServiceHandler {
   replaceSession(request: ReplaceSessionRequest): Promise<ReplaceSessionResponse>;
   send(request: SendRequest): Promise<MessageResponse>;
   authenticate(request: AuthenticateRequest): Promise<AuthenticateResponse>;
-  issueCredential(request: { context?: AuthenticateRequest["context"]; sessionId: string }): Promise<CredentialResponse>;
+  issueCredential(request: { context?: AuthenticateRequest["context"]; sessionId: string; proof: string }): Promise<CredentialResponse>;
+  issueBootstrapCredential?(request: { context?: AuthenticateRequest["context"]; sessionId: string; bootstrap: string }): Promise<CredentialResponse>;
   getSessions(request: GetSessionsRequest): Promise<SessionsResponse>;
   getRoster(request: GetRosterRequest): Promise<RosterResponse>;
   getMembershipHistory(request: GetMembershipHistoryRequest): Promise<MembershipHistoryResponse>;
@@ -95,9 +100,20 @@ export interface RoomsServiceHandler {
   usageSeries?(request: UsageSeriesRequest): Promise<import("../../storage/usage-history.js").UsageSeries>;
   registerChannelSession?(request: RegisterChannelSessionRequest): Promise<RegisterChannelSessionResponse>;
   launchSession?(request: LaunchSessionRequest): Promise<LaunchSessionResponse>;
+  createChannelProfileRevision?(request: CreateChannelProfileRevisionRequest): Promise<ChannelProfileRevisionResponse>;
+  listChannelProfileRevisions?(request: ListChannelProfileRevisionsRequest): Promise<ChannelProfileRevisionsResponse>;
+  readChannelProfileRevision?(request: ReadChannelProfileRevisionRequest): Promise<ChannelProfileRevisionResponse>;
+  listProfileSkillCatalog?(request: ListProfileSkillCatalogRequest): Promise<ProfileSkillCatalogResponse>;
+  getSessionProfileBindings?(request: GetSessionProfileBindingsRequest): Promise<SessionProfileBindingsResponse>;
+  launchSessionWithProfile?(request: LaunchSessionWithProfileRequest): Promise<LaunchSessionResponse>;
   inspectSession?(request: InspectSessionRequest): Promise<InspectSessionResponse>;
   endManagedSession?(request: EndManagedSessionRequest): Promise<void>;
+  listOwnedSessions?(request: ListOwnedSessionsRequest): Promise<unknown>;
+  endOwnedSessions?(request: EndOwnedSessionsRequest): Promise<unknown>;
   sendMessage?(request: LocalSendMessageRequest): Promise<MessageResponse>;
+  updateChannelCoordinationPolicy?(request: UpdateChannelCoordinationPolicyRequest): Promise<ChannelResponse>;
+  /** Private authenticated operation; resolves each destination's current planner in Rooms. */
+  leadBroadcast?(request: LeadBroadcastRequest): Promise<LeadBroadcastResponse>;
   suspendChannel?(request: LocalChannelLifecycleRequest): Promise<unknown>;
   resumeChannel?(request: LocalChannelLifecycleRequest): Promise<LocalChannelResumeOutcome[]>;
   archiveChannel?(request: LocalChannelArchiveRequest): Promise<LocalChannelArchiveResponse>;
@@ -191,8 +207,8 @@ export function createRoomsServiceHandler({ service }: RoomsServiceHandlerDeps):
     runtimeEvents: (request) => service.runtimeEvents(request),
   };
   for (const method of [
-    "channelStateSnapshots", "channelControlPages", "usageSeries", "registerChannelSession", "launchSession", "inspectSession",
-    "endManagedSession", "sendMessage", "suspendChannel", "resumeChannel", "archiveChannel", "listProviders", "writeProvider", "removeProvider",
+    "channelStateSnapshots", "channelControlPages", "usageSeries", "registerChannelSession", "launchSession", "createChannelProfileRevision", "listChannelProfileRevisions", "readChannelProfileRevision", "listProfileSkillCatalog", "getSessionProfileBindings", "launchSessionWithProfile", "inspectSession",
+    "endManagedSession", "listOwnedSessions", "endOwnedSessions", "sendMessage", "leadBroadcast", "suspendChannel", "resumeChannel", "archiveChannel", "listProviders", "writeProvider", "removeProvider",
     "resolveSessionRuntime", "rotationInspect", "rotationPrepare", "rotationAcknowledge", "rotationCommit", "rotationCancel",
     "runtimeAttachStream", "runtimeQuotaGet", "runtimeQuotaSet", "runtimeQuotaReset",
   ] as const) {

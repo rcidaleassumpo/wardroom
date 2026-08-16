@@ -30,7 +30,7 @@ every implementation method is available on every listener.
 The current release contract uses these version spaces:
 
 - Release protocol `4` is the current Rooms release contract.
-- Store schema `22` is an internal SQLite version, not a network protocol.
+- Store schema `27` is an internal SQLite version, not a network protocol.
 - Protobuf package `rooms.v1` and generated marker `1` name API types.
 - Runtime-host protocol `1` covers local host enrollment and frames.
 - Federation protocol `1` covers peer enrollment and command envelopes.
@@ -67,6 +67,15 @@ or has no role. Authentication resolves the actor session and role from Rooms.
 Caller-supplied sender, role, registrar, or `authorized_by_session_id` fields do
 not override that identity.
 
+The local `IssueCredential` path requires proof from the newest active runtime
+for that session. Rooms generates a separate random proof for each runtime
+generation and stores only its SHA-256 hash. One-shot enrollment gives the raw
+proof to the runtime host. The
+host adds it to the owned provider process as `ROOMS_SESSION_PROOF`. A session
+id alone, another session's proof, an ended generation's proof, or a runtime
+created before store schema `25` cannot mint a credential. This proof is not the
+runtime reconnect secret and grants no runtime-host control.
+
 Current domain roles are `operator`, `planner`, `worker`, and `reviewer`. The
 protobuf keeps role as a string, but the current service applies these rules:
 
@@ -85,7 +94,7 @@ instead of a token. It must still use the same Rooms identity and domain rules.
 ## 4. Records, cursors, and replay
 
 `Channel` records registration time, owner, active/closed state, optional close
-time, label, and broadcast policy. `Session` records registration/end time,
+time, label, broadcast policy, and coordination policy. `Session` records registration/end time,
 display name, role, and optional provider thread ID. Membership history keeps
 join, leave, session-end, and role facts; leaving does not erase history.
 
@@ -118,9 +127,10 @@ capability. Copying, replacing, or migrating a store can change the oldest
 available cursor. Protocol v4 has no replay-gap discovery RPC.
 
 `GetEvents` session paging returns the newest relevant page in cursor order.
-Its default is 50 and the maximum is 500. `Search` applies the same default and
-maximum, requires either channel or all scope, and returns the newest matching
-event first. `ListChannels`, `GetSessions`, `GetRoster`, and
+Its default is 50 and the maximum is 500. A channel request that states a limit
+is paged the same way and needs no session. `Search` applies the same default
+and maximum, requires either channel or all scope, and
+returns the newest matching event first. `ListChannels`, `GetSessions`, `GetRoster`, and
 `GetMembershipHistory` have no paging fields and return their full stored result
 in the order stated by the implementation. Clients must not use those methods
 as unbounded event feeds.
@@ -144,6 +154,10 @@ do not assume the stream kept later deltas after it closed.
 - `Join` adds a live session under the current role authority rules.
 - `Leave` ends an active membership without ending the session.
 - `EndSession` ends the session. Its credential cannot authenticate a live actor.
+  A session ends itself. An operator ends a session it owns externally, a member
+  of a channel it owns or takes part in, or a session with no active membership.
+  Reaching into an unrelated operator's channel fails with `unauthorized`. A
+  planner ends a worker it supervises.
 - `ReplaceSession` replaces one member with another under operator authority.
 
 ### Messages and credentials
@@ -163,7 +177,12 @@ do not assume the stream kept later deltas after it closed.
 - `GetEvents` returns events after a cursor or legacy event boundary. It can
   also show one exact event or list messages correlated to one exact parent.
   Optional session and limit fields provide bounded session-relevant paging.
-- `Search` searches one channel or all stored messages with a caller limit.
+- `Search` searches one channel or all stored messages with a caller limit. It
+  matches literal text, not a pattern. With `include_control` it also matches
+  committed control payloads. With `include_channel_digests` it returns one
+  `ChannelSearchHit` per matching channel, ordered by newest match, carrying
+  match counts, which part matched, recency, and an excerpt; `active_only`
+  skips closed channels.
 - `Watch` streams snapshot, delta, and lifecycle values for one channel.
 - `Status` returns observed service lifecycle state.
 
@@ -255,7 +274,7 @@ Runtime-host delivery acknowledgements are `written`, `duplicate`, or
 `duplicate` means that delivery ID was already accepted there; `uncertain` is
 not success and is recorded as rejected/uncertain runtime delivery.
 
-Store schema 22 adds durable provider-reply jobs for one narrow local case: a
+Store schema 22 adds durable provider-reply jobs. By default, they apply when a
 log-delivered client sends a direct channel message to a provider runtime.
 Rooms records the provider transcript offsets before delivery and waits for the
 exact input plus a provider-native final marker. It then commits one canonical
@@ -264,12 +283,17 @@ event. A stable deduplication key makes retries exact once. If the provider
 already sent a canonical Rooms reply, Rooms records a skipped job and does not
 copy the provider final again.
 
+Store schema 26 adds the opt-in `lead-upstream` coordination policy. A worker in
+such a channel can send only to its active planner. If no planner exists, the
+worker can send to the owning operator. Provider replies use the same route.
+The `open` default preserves other Rooms usage.
+
 If the provider does not record the delivered input within 30 seconds, Rooms
 ends the job as failed. It does not poll a dropped PTY submission forever.
 
-This rule does not apply to broadcasts, channel-less direct sends, managed
-launch prompts, or a sender whose delivery mode is `runtime`. It does not make
-PTY output canonical.
+This rule does not apply to broadcasts, channel-less direct sends, or managed
+launch prompts. A runtime sender enables it only in a `lead-upstream` channel.
+It does not make PTY output canonical.
 Reasoning, tool calls, streaming commentary, and terminal bytes remain runtime
 data. Codex, Claude, Grok, Antigravity, and Google Gemini CLI adapters must
 identify final answers from their own structured transcripts.
@@ -392,7 +416,7 @@ receipt alone does not prove that a remote provider received and answered.
 The settled local extension boundary is:
 
 The checked-in protobuf remains the public 28-RPC contract. The TypeScript
-service surface names those methods in `RoomsProtoService`. It keeps 39 private
+service surface names those methods in `RoomsProtoService`. It keeps 42 private
 local methods in `RoomsLocalServiceExtensions`. These methods cover role and
 control changes, bulk queries, channel and session lifecycle, and message
 delivery. They also cover provider access, rotation, runtime resolution,

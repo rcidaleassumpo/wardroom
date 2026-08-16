@@ -24,14 +24,30 @@ import { drainRuntimeOutput, waitForProviderReady } from "../../cli/runtime-drai
 import type { RoomsCLIBackend, RuntimeAttachCLIInput } from "../../cli/backend.js";
 import { stampRoomsProvenance } from "../../domain/message-provenance.js";
 import { providerModelCatalog } from "../../providers/model-catalog.js";
+import { listChannelProfileRevisions, readChannelProfileRevision } from "../../profiles/profile-revision-store.js";
 import { captureProviderReplyScanState, scanProviderFinalReply, supportsProviderFinalReply, type ProviderReplyScanState } from "../provider-final-reply.js";
 import { ProviderReplyBridge } from "../provider-reply-bridge.js";
 import { prepareManagedProviderLaunch } from "../provider-managed-launch.js";
-import { composeRoomsAgentBriefing } from "../../cli/agent-briefing.js";
+import { SessionProofBootstrap } from "../../credentials/session-proof-bootstrap.js";
+import { OperatorCredentialStore } from "../../credentials/operator-credential.js";
+import { materializeCodexControlledHome } from "../../cli/codex-controlled-home.js";
+import { listSessionProfileBindings, persistSessionProfileBinding } from "../../profiles/session-profile-binding-store.js";
+import { materializeProfileToolEnvironment } from "../../profiles/profile-tool-environment.js";
+import { createNextChannelProfileRevision, listProfileSkillCatalog, readChannelProfileRevisionForChannel } from "../../profiles/channel-profile-api.js";
+import { sessionLaunchProvenance } from "../../domain/session-provenance.js";
 
 const now = () => new Date().toISOString();
 export const DEFAULT_QUERY_LIMIT = 50;
 export const MAX_QUERY_LIMIT = 500;
+
+/**
+ * A profile launch keeps provider-owned context and caller-owned task content
+ * distinct. The profile materializer supplies the former through Codex
+ * developer instructions.
+ */
+export function composeSessionLaunchPrompt(sessionId: string, callerPrompt: string, controlledProfile: boolean): string {
+  return controlledProfile ? callerPrompt : `You are a Rooms session ${sessionId}.\n\n${callerPrompt}`;
+}
 
 function queryLimit(value: unknown): number {
   const parsed = value == null || value === 0 ? DEFAULT_QUERY_LIMIT : Number(value);
@@ -53,15 +69,26 @@ export type FederationCompositionPlug = Readonly<{
 }>;
 
 /** Compose the native runtime against the same SQLite authority as the CLI. */
-export function createNativeComposition(databasePath: string, hostExecutable = process.env.ROOMS_RUNTIME_HOST_BIN, stateDir = process.env.ROOMS_STATE_DIR ?? dirname(databasePath), federation?: FederationCompositionPlug): { database: RoomsRepository; handler: RoomsServiceHandler; runtimeService: RoomsRuntimeService; providerReplyBridge: ProviderReplyBridge; relayHandlerFactory: (() => unknown) | null } {
+export function createNativeComposition(databasePath: string, hostExecutable = process.env.ROOMS_RUNTIME_HOST_BIN, stateDir = process.env.ROOMS_STATE_DIR ?? dirname(databasePath), federation?: FederationCompositionPlug): { database: RoomsRepository; handler: RoomsServiceHandler; runtimeService: RoomsRuntimeService; providerReplyBridge: ProviderReplyBridge; relayHandlerFactory: (() => unknown) | null; homeAuthorityId: string } {
   const database = new RoomsRepository(prepareCanonicalStorePath(databasePath));
   const application = new RoomsApplication(database);
   const homeAuthorityId = readMachineIdentityStatus(stateDir).authorityId;
   const runtimeService = new RoomsRuntimeService(new RuntimeRepository(database.db, {
     onLifecycleChange: (change) => { database.recordRuntimeLifecycle(change); },
   }), { machineId: hostname(), defaultHomeAuthorityId: homeAuthorityId, stateDir: join(stateDir, "runtimes"), socketDirectory: join(stateDir, "s"), hostExecutable });
-  const providerReplyBridge = new ProviderReplyBridge(database, application);
-  providerReplyBridge.start();
+  const runtimeRepository = new RuntimeRepository(database.db);
+  const proofBootstrap = new SessionProofBootstrap(stateDir, runtimeRepository.legacyOperatorSessionsNeedingProof());
+  const operatorCredentials = new OperatorCredentialStore(stateDir);
+  let handler: RoomsServiceHandler;
+  const providerReplyBridge = new ProviderReplyBridge(database, application, undefined, async (reply) => handler.send({
+    senderSessionId: reply.senderSessionId,
+    channelId: reply.channelId,
+    target: { kind: "direct", sessionId: reply.targetSessionId },
+    body: reply.body,
+    replyToEventId: reply.replyToEventId,
+    correlation: reply.correlation,
+    __connection: { authenticatedSessionId: reply.senderSessionId, credentials: new Map(), onClose: new Set() },
+  } as never) as Promise<{ event: { id: string } }>);
   const blueprints = new SQLiteBlueprintStore(database.db);
   const channelLifecycle = new LocalChannelLifecycle(database, blueprints, runtimeService, homeAuthorityId, stateDir);
   const connection = (request: any): RoomsConnectionState => request?.__connection ?? (() => { throw new Error("connection identity unavailable"); })();
@@ -79,9 +106,34 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     if (typeof credential !== "string" || credential.trim() === "") throw new Error("runtime credential is required");
     const sessionId = state.credentials.get(credential);
     if (!sessionId || state.authenticatedSessionId !== sessionId) throw new Error("invalid or missing credential");
+    if (state.bootstrapCredentials?.has(credential)) throw new Error("bootstrap credential permits only its session relaunch");
     const role = database.sessionRoleValue(sessionId);
     if (!role) throw new Error("runtime actor session is unavailable");
     return { sessionId, role, credentialId: credential };
+  };
+  const consumedBootstrapActor = (request: any): RuntimeActor | null => {
+    const state = connection(request);
+    const credential = request?.context?.credential;
+    const bootstrapSessionId = typeof credential === "string" ? state.bootstrapCredentials?.get(credential) : undefined;
+    if (!bootstrapSessionId) return null;
+    return { sessionId: bootstrapSessionId, role: "operator", credentialId: credential };
+  };
+  const runtimeCreateActor = (request: any): { actor: RuntimeActor; bootstrap: boolean } => {
+    const state = connection(request);
+    const bootstrapActor = consumedBootstrapActor(request);
+    if (!bootstrapActor) return { actor: runtimeActor(request), bootstrap: false };
+    const bootstrapSessionId = bootstrapActor.sessionId;
+    if (state.authenticatedSessionId !== bootstrapSessionId || request.sessionId !== bootstrapSessionId || database.sessionRoleValue(bootstrapSessionId) !== "operator") {
+      throw new Error("bootstrap credential permits only its session relaunch");
+    }
+    return { actor: bootstrapActor, bootstrap: true };
+  };
+  const revokeBootstrapCredential = (request: any, actor: RuntimeActor): void => {
+    const state = connection(request);
+    state.bootstrapCredentials?.delete(actor.credentialId);
+    state.credentials.delete(actor.credentialId);
+    if (state.authenticatedSessionId === actor.sessionId) state.authenticatedSessionId = undefined;
+    if (state.authenticatedCredential === actor.credentialId) state.authenticatedCredential = undefined;
   };
   const ownerActor = (request: any, channelId?: string): RuntimeActor => {
     const actor = runtimeActor(request);
@@ -89,6 +141,20 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     const owner = channelId ? database.currentChannel(channelId)?.ownerOperatorSessionId : null;
     const activeOperatorMember = channelId ? database.isActiveMember(channelId, actor.sessionId, "operator") : false;
     if (owner && owner !== actor.sessionId && !activeOperatorMember) throw new Error("owning or active channel operator credential is required");
+    return actor;
+  };
+  const profileChannelActor = (request: any, requireActive = false): RuntimeActor => {
+    const channelId = typeof request.channelId === "string" ? request.channelId : "";
+    const channel = channelId ? database.currentChannel(channelId) : null;
+    if (!channel) throw new Error("profile channel does not exist");
+    if (requireActive && channel.lifecycleState !== "active") throw new Error("profile channel is not active");
+    return ownerActor(request, channelId);
+  };
+  const externalOwnerActor = (request: any): RuntimeActor => {
+    const actor = ownerActor(request, request.channelId);
+    const owner = typeof request.externalOwner === "string" ? request.externalOwner.trim() : "";
+    const legacyOwner = database.currentSession(actor.sessionId)?.externalOwner;
+    if (!owner || (owner !== actor.sessionId && legacyOwner !== owner)) throw new RoomsStoreError("externalOwnerAccessDenied");
     return actor;
   };
   const describeProvider = (provider: ProviderRegistration): Record<string, unknown> => ({ ...provider, launchOptions: providerLaunchOptionsSchema(provider.name), modelCatalog: providerModelCatalog(provider.name, stateDir) });
@@ -153,8 +219,12 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       const launchOptions = input.prior.launch.launchOptions as { command?: string[]; cwd?: string; model?: string; reasoning?: string };
       const command = Array.isArray(launchOptions.command) ? launchOptions.command : undefined;
       if (!command?.length || typeof launchOptions.cwd !== "string") throw new Error("rotationLaunchConfigurationUnavailable");
+      // The replacement resumes the prior provider thread, whose transcript
+      // lives inside the prior generation's home; a controlled home must
+      // therefore survive rotation.
+      const priorHome = database.db.prepare("SELECT effective_home FROM runtimes WHERE runtime_id=?").get(input.prior.runtimeId) as { effective_home?: string | null } | undefined;
       const response = await runtimeService.create({ homeAuthorityId, sessionId: replacementSessionId, generation: 1, channelId: input.channelId,
-        adapterKind: input.prior.launch.provider, cwd: launchOptions.cwd, command, launchPolicyRef: JSON.stringify(launchOptions) } as any,
+        adapterKind: input.prior.launch.provider, cwd: launchOptions.cwd, effectiveHome: priorHome?.effective_home ?? null, command, launchPolicyRef: JSON.stringify(launchOptions) } as any,
         { sessionId: input.prior.sessionId, role: "operator", credentialId: "rotation-authority" });
       const runtime = (response as any).runtime;
       return { ...input.prior, runtimeId: runtime.runtimeId, sessionId: replacementSessionId, generation: runtime.generation, state: runtime.state, providerThreadId: runtime.providerThreadId };
@@ -179,7 +249,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     },
     async terminate(input) { await runtimeService.terminate({ runtimeId: input.runtimeId, generation: input.generation } as any, { sessionId: input.sessionId, role: "operator", credentialId: "rotation-authority" }); },
   });
-  const handler: RoomsServiceHandler = {
+  handler = {
     async createChannel(request: any): Promise<any> {
       const actorId = authenticated(request);
       const role = database.sessionRoleValue(actorId);
@@ -203,10 +273,25 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       const receipt = application.setChannelBroadcastPolicy(request.channelId, request.broadcastPolicy, { credentialId: request.context?.credential ?? "authenticated", actorSessionId: actorId, role });
       return { channel: database.currentChannel(request.channelId), cursor: receipt.cursor };
     },
+    async updateChannelCoordinationPolicy(request: any): Promise<any> {
+      const actorId = authenticated(request);
+      const role = database.sessionRoleValue(actorId);
+      if (!role) throw new RoomsStoreError("unauthorized");
+      const receipt = application.setChannelCoordinationPolicy(request.channelId, request.coordinationPolicy, { credentialId: request.context?.credential ?? "authenticated", actorSessionId: actorId, role });
+      return { channel: database.currentChannel(request.channelId), cursor: receipt.cursor };
+    },
     async registerSession(request: any): Promise<any> {
       if (request.channelId) {
-        const receipt = database.registerSession(request.channelId, request.sessionId, request.role ?? "worker", request.externalId ?? null, request.deliveryMode ?? null, request.displayName ?? null);
+        const receipt = database.registerSession(request.channelId, request.sessionId, request.role ?? "worker", request.externalId ?? null, request.deliveryMode ?? null);
         return { session: database.currentSession(request.sessionId), membership: database.roster(request.channelId).find((item: any) => item.sessionId === request.sessionId), idempotent: receipt.idempotent };
+      }
+      const existing = database.currentSession(request.sessionId);
+      if (existing?.role === "operator" && request.context?.credential) {
+        const actor = authenticated(request);
+        if (actor !== request.sessionId) throw new RoomsStoreError("operatorSessionNotRecoverable");
+        database.reactivateOperatorSession(request.sessionId);
+      } else if (existing?.endedAt) {
+        throw new RoomsStoreError("operatorSessionNotRecoverable");
       }
       return { session: database.currentSession(request.sessionId) ?? database.insertSession({ id: request.sessionId, displayName: request.displayName ?? null, role: request.role, deliveryMode: request.deliveryMode ?? null }).changes[0]?.payload };
     },
@@ -239,6 +324,16 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
         }
         target = { kind: "broadcast", sessionIds: database.roster(request.channelId).map((member: any) => member.sessionId).filter((id: string) => id !== sessionId) };
       }
+      const channel = request.channelId ? database.currentChannel(request.channelId) : null;
+      const senderRole = database.sessionRoleValue(sessionId);
+      if (channel?.coordinationPolicy === "lead-upstream" && senderRole === "worker") {
+        const planners = database.roster(request.channelId).filter((member: any) => member.role === "planner") as Array<{ sessionId: string }>;
+        const upstreamSessionId = planners.length === 1 ? planners[0].sessionId : channel.ownerOperatorSessionId;
+        if (!upstreamSessionId) throw new RoomsStoreError("upstreamUnavailable", `channel ${request.channelId} has no active lead or owning operator`);
+        if (target.kind !== "direct" || target.sessionId !== upstreamSessionId) {
+          throw new RoomsStoreError("upstreamRestricted", `worker messages in channel ${request.channelId} must target the active lead, or the owning operator when no lead exists`);
+        }
+      }
       const recipients = target.kind === "direct" ? [target.sessionId] : target.sessionIds ?? [];
       if (recipients.length === 0) throw new RoomsStoreError("noAcceptedRecipients", "message has no recipient other than sender");
       if (target.kind === "direct") {
@@ -252,7 +347,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       const shouldBridgeProviderReply = target.kind === "direct"
         && typeof request.channelId === "string"
         && request.channelId.length > 0
-        && database.sessionDeliveryModeValue(sessionId) === "log"
+        && (database.sessionDeliveryModeValue(sessionId) === "log" || channel?.coordinationPolicy === "lead-upstream")
         && request.correlation?.purpose !== "sessionLaunchPrompt";
       for (const recipient of recipients) {
         // A log-delivered participant (e.g. a UI operator) has no runtime by
@@ -267,7 +362,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
               replyScans.set(recipient, {
                 adapterKind: identity.provider,
                 providerThreadId: identity.providerThreadId,
-                state: captureProviderReplyScanState(identity.provider, identity.providerThreadId),
+                state: captureProviderReplyScanState(identity.provider, identity.providerThreadId, identity.effectiveHome ?? undefined),
               });
             }
           }
@@ -278,7 +373,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
           if (target.kind === "direct") throw new RoomsStoreError("recipientUndeliverable", `recipient session ${recipient} has no live runtime`);
         }
       }
-      const receipt = application.commitMessage({ channelId: request.channelId ?? null, senderSessionId: sessionId, body: request.body, target, replyToEventId: request.replyToEventId, correlation: request.correlation, deliveryStatuses: statuses });
+      const receipt = application.commitMessage({ channelId: request.channelId ?? null, senderSessionId: sessionId, body: request.body, target, replyToEventId: request.replyToEventId, correlation: request.correlation, deliveryStatuses: statuses, attachmentReferences: request.attachmentReferences });
       const event = receipt.event as { id: string; body: string };
       for (const recipient of recipients) {
         const runtime = runtimes.get(recipient);
@@ -353,6 +448,11 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
           limit: request.limit,
         });
       }
+      // A channel request that states a limit is paged in SQL for the same
+      // reason: the caller asked for a page, not the channel's whole history.
+      if (request.channelId && request.limit) {
+        return database.channelMessages(request.channelId, { afterCursor, limit: request.limit });
+      }
       const changes = database.replay(afterCursor, request.channelId);
       const messages = changes.filter((change) => change.kind === "message.sent").map((change) => change.payload);
       return { events: messages, cursor: changes.at(-1)?.cursor ?? afterCursor, hasMore: false };
@@ -387,8 +487,45 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     },
     async registerChannelSession(request: any): Promise<any> {
       ownerActor(request, request.channelId);
-      const receipt = database.registerSession(request.channelId, request.sessionId, request.role ?? "worker", request.externalId ?? null, request.deliveryMode ?? null);
+      const receipt = database.registerSession(request.channelId, request.sessionId, request.role ?? "worker", request.externalId ?? null, request.deliveryMode ?? null, { externalOwner: request.externalOwner, externalAgentId: request.externalAgentId });
       return { session: database.currentSession(request.sessionId), membership: database.roster(request.channelId).find((item: any) => item.sessionId === request.sessionId), idempotent: receipt.idempotent };
+    },
+    async createChannelProfileRevision(request: any): Promise<any> {
+      const actor = profileChannelActor(request, true);
+      const draft = request.draft;
+      if (!draft || typeof draft !== "object" || Array.isArray(draft)) throw new Error("profile draft is required");
+      const requestedSkillCount = Array.isArray(draft.modelSkillSets)
+        ? draft.modelSkillSets.reduce((count: number, set: any) => count + (Array.isArray(set?.skills) ? set.skills.length : 0), 0)
+        : 0;
+      const skillCatalog = requestedSkillCount > 0 ? listProfileSkillCatalog() : [];
+      const skillsByPath = new Map(skillCatalog.map((skill) => [skill.sourcePath, skill]));
+      for (const set of draft.modelSkillSets ?? []) {
+        const catalog = providerModelCatalog(set.provider, stateDir);
+        if (!catalog || catalog.version !== set.catalogVersion) throw new Error(`profile model set requires the current ${set.provider} catalog version`);
+        const entry = catalog.models.find((model) => model.id === set.model);
+        if (!entry || entry.availability !== "available" || entry.deprecated) throw new Error(`profile model must be a canonical available ${set.provider} catalog id`);
+        for (const skill of set.skills ?? []) {
+          const available = skillsByPath.get(skill.path);
+          if (!available || available.name !== skill.name || !available.providers.includes(set.provider)) {
+            throw new Error(`profile skill is not available for ${set.provider}: ${skill.name}`);
+          }
+        }
+      }
+      const profile = createNextChannelProfileRevision({ stateDir, channelId: request.channelId, name: request.name, createdBySessionId: actor.sessionId, draft });
+      return { profile };
+    },
+    async readChannelProfileRevision(request: any): Promise<any> {
+      profileChannelActor(request);
+      return { profile: readChannelProfileRevisionForChannel(stateDir, request.channelId, request.revisionId) };
+    },
+    async listProfileSkillCatalog(request: any): Promise<any> {
+      ownerActor(request);
+      return { skills: listProfileSkillCatalog() };
+    },
+    async getSessionProfileBindings(request: any): Promise<any> {
+      profileChannelActor(request);
+      const bindings = listSessionProfileBindings(stateDir, request.sessionId).filter((binding) => binding.channelId === request.channelId);
+      return { bindings };
     },
     async launchSession(request: any): Promise<any> {
       const actor = runtimeActor(request);
@@ -396,7 +533,54 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       if (actor.role !== "operator" && !(actor.role === "planner" && role === "worker" && database.isActiveMember(request.channelId, actor.sessionId, "planner"))) {
         throw new Error("session launch requires an operator or the channel's active planner launching a worker");
       }
+      const actorSession = database.currentSession(actor.sessionId);
+      const { externalOwner, externalAgentId } = sessionLaunchProvenance({
+        actorRole: actor.role,
+        actorExternalOwner: actorSession?.externalOwner ?? null,
+        targetSessionId: request.sessionId,
+        externalOwner: request.externalOwner,
+        externalAgentId: request.externalAgentId,
+      });
       const registration = registeredProvider(request.provider, stateDir);
+      let effectiveHome: string | null = request.effectiveHome ?? null;
+      let profileEnvironment: Readonly<Record<string, string>> = {};
+      const requestedProfile = request.provider === "codex" ? request.launchOptions?.profile : undefined;
+      if (requestedProfile !== undefined) {
+        if (typeof requestedProfile !== "string" || !requestedProfile.trim()) throw new Error("profile must be a non-empty revision ID");
+        const profile = readChannelProfileRevision(stateDir, requestedProfile);
+        if (profile.channelId !== request.channelId) throw new Error("profile revision does not belong to this channel");
+        const requestedModel = request.launchOptions?.model;
+        const modelSkillSet = profile.modelSkillSets.find(set => set.provider === "codex" && (requestedModel === undefined || set.model === requestedModel));
+        if (!modelSkillSet) throw new Error("profile revision has no matching codex model skill set");
+        effectiveHome = join(stateDir, "controlled", request.sessionId, "home");
+        const projectInstructions = profile.projectInstructions.mode === "snapshot"
+          ? { mode: "snapshot" as const, text: profile.projectInstructions.snapshots.map(snapshot => snapshot.text).join("\n") }
+          : { mode: "exclude" as const };
+        materializeCodexControlledHome({
+          instructionsText: profile.instructions.text,
+          systemContext: `You are a Rooms session ${request.sessionId}.`,
+          projectInstructions,
+          skills: modelSkillSet.skills.map(skill => ({ name: skill.name, snapshotPath: skill.snapshotPath, sha256: skill.rootSha256 })),
+          model: modelSkillSet.model,
+        }, { sessionDir: join(stateDir, "controlled", request.sessionId), homeDir: join(effectiveHome, ".codex"), authHomeDir: join(stateDir, "codex-auth-home"), trustedWorkingDirectory: request.cwd });
+        profileEnvironment = materializeProfileToolEnvironment(effectiveHome, modelSkillSet.toolEnvironment).environment;
+        persistSessionProfileBinding(stateDir, {
+          id: `binding-${request.sessionId}`,
+          sessionId: request.sessionId,
+          channelId: request.channelId,
+          profileRevisionId: profile.id,
+          profileSha256: profile.sha256,
+          modelSkillSetId: modelSkillSet.id,
+          provider: "codex",
+          requestedModel: String(requestedModel ?? modelSkillSet.model),
+          effectiveModel: modelSkillSet.model,
+          executablePath: registration.executable,
+          executableVersion: "unknown",
+          authAttestation: { requiredMode: modelSkillSet.authMode, resolvedMode: "unknown", credentialSource: "unknown", accountPresent: false, apiKeyEnvironmentVariables: [], verifiedAt: now() },
+          resolvedStateAttestation: null,
+          boundAt: now(),
+        });
+      }
       const catalog = providerModelCatalog(request.provider, stateDir);
       if (catalog) {
         const model = request.launchOptions?.model;
@@ -409,23 +593,26 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       }
       const providerArguments = Array.isArray(request.providerArguments) ? request.providerArguments.map(String) : [];
       const translatedArguments = providerLaunchArguments(request.provider, registration.adapter, request.launchOptions ?? {}, registration.defaults, providerArguments);
-      const prompt = composeRoomsAgentBriefing({
-        sessionId: request.sessionId,
-        displayName: request.displayName ?? null,
-        channel: request.channelId,
-        goal: request.prompt,
-      });
+      // A controlled profile carries Rooms identity and immutable channel rules
+      // through Codex developer instructions. Keep the caller's task as the
+      // exact initial user message so neither source is conflated with the other.
+      const prompt = composeSessionLaunchPrompt(request.sessionId, request.prompt, requestedProfile !== undefined);
       const managedLaunch = prepareManagedProviderLaunch({
         adapterKind: registration.adapter,
         arguments: translatedArguments,
         prompt,
       });
-      const relaunchCommand = [registration.executable, ...translatedArguments];
-      const command = [registration.executable, ...managedLaunch.arguments];
+      const homePrefix = effectiveHome
+        ? ["/usr/bin/env", `CODEX_HOME=${effectiveHome}/.codex`, ...Object.entries(profileEnvironment).sort(([left], [right]) => left.localeCompare(right)).map(([name, value]) => `${name}=${value}`)]
+        : [];
+      const relaunchCommand = [...homePrefix, registration.executable, ...translatedArguments];
+      const command = [...homePrefix, registration.executable, ...managedLaunch.arguments];
+      // Session generated home root (user-home-shaped, dot-dirs under it).
+      // Profile launches materialize one and set it here; null stays ambient.
       const promptScan = managedLaunch.providerThreadId
-        ? captureProviderReplyScanState(registration.adapter, managedLaunch.providerThreadId)
+        ? captureProviderReplyScanState(registration.adapter, managedLaunch.providerThreadId, effectiveHome ?? undefined)
         : null;
-      database.registerSession(request.channelId, request.sessionId, role, null, "runtime", request.displayName ?? null);
+      database.registerSession(request.channelId, request.sessionId, role, null, "runtime", { externalOwner, externalAgentId });
       let launched: any;
       try {
         launched = await runtimeService.create({
@@ -436,6 +623,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
           adapterKind: registration.adapter,
           providerThreadId: managedLaunch.providerThreadId,
           cwd: request.cwd,
+          effectiveHome,
           command,
           launchPolicyRef: JSON.stringify({ ...request.launchOptions, command: relaunchCommand, cwd: request.cwd }),
         } as never, actor);
@@ -447,7 +635,7 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
           channelId: request.channelId,
           priorSessionId: request.sessionId,
           intent: { role, workUnitId: null },
-          launch: { executable: relaunchCommand[0]!, args: relaunchCommand.slice(1), cwd: request.cwd },
+          launch: { executable: relaunchCommand[0]!, args: relaunchCommand.slice(1), cwd: request.cwd, home: effectiveHome },
           layout: { terminalColumns: null, terminalRows: null, layoutVersion: "1" },
           adapterKind: registration.adapter,
           lastAcknowledgedDeliveryCursor: "0",
@@ -460,13 +648,18 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
         const providerReady = await waitForProviderReady(attachInput, attachBackend(actor) as RoomsCLIBackend);
         const timeoutMs = request.promptTimeoutMs == null ? 30_000 : Number(request.promptTimeoutMs);
         if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) throw new Error("promptTimeoutMs must be a non-negative integer");
-        const delivery = managedLaunch.promptPreloaded && managedLaunch.providerThreadId && promptScan
-          ? await acceptPreloadedGeminiPrompt({
+        const delivery = managedLaunch.promptPreloaded
+          ? await acceptPreloadedProviderPrompt({
               adapterKind: registration.adapter,
               providerThreadId: managedLaunch.providerThreadId,
               prompt,
               scanState: promptScan,
+              homeDirectory: effectiveHome,
               timeoutMs,
+              resolveProviderThreadId: () => {
+                const status = runtimeService.status({ runtimeId: runtime.runtimeId } as never, actor);
+                return status.runtime?.providerThreadId ?? null;
+              },
               commit: () => application.commitMessage({
                 channelId: request.channelId,
                 senderSessionId: actor.sessionId,
@@ -505,6 +698,17 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
         throw error;
       }
     },
+    async launchSessionWithProfile(request: any): Promise<any> {
+      if (typeof request.profileRevisionId !== "string" || !request.profileRevisionId.trim()) throw new Error("profileRevisionId is required");
+      if (typeof request.modelSkillSetId !== "string" || !request.modelSkillSetId.trim()) throw new Error("modelSkillSetId is required");
+      const actor = runtimeActor(request);
+      const role = request.role ?? "worker";
+      if (actor.role !== "operator" && !(actor.role === "planner" && role === "worker" && database.isActiveMember(request.channelId, actor.sessionId, "planner"))) {
+        throw new Error("session launch requires an operator or the channel's active planner launching a worker");
+      }
+      readChannelProfileRevisionForChannel(stateDir, request.channelId, request.profileRevisionId);
+      throw new Error("controlled profile launch is not ready until resolved-state verification is installed");
+    },
     async inspectSession(request: any): Promise<any> {
       ownerActor(request);
       return database.inspectSession(request.sessionId);
@@ -518,6 +722,26 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       const receipt = application.endSession(request.sessionId, { credentialId: actor.credentialId, actorSessionId: actor.sessionId, role: actor.role });
       return { session: database.currentSession(request.sessionId), cursor: receipt.cursor };
     },
+    async listOwnedSessions(request: any): Promise<any> {
+      externalOwnerActor(request);
+      return { sessions: database.ownedSessions(request.channelId, request.externalOwner) };
+    },
+    async endOwnedSessions(request: any): Promise<any> {
+      const actor = externalOwnerActor(request);
+      const owned = database.ownedSessions(request.channelId, request.externalOwner);
+      const requested = request.sessionIds == null ? null : new Set(request.sessionIds.map(String));
+      if (requested && [...requested].some(id => !owned.some(session => session.id === id))) throw new RoomsStoreError("externalOwnerAccessDenied");
+      const targets = requested ? owned.filter(session => requested.has(session.id)) : owned;
+      const listed = await runtimeService.list({}, actor) as { runtimes?: Array<{ runtimeId: string; sessionId: string; generation: number; state: string; endedAt?: string | null }> };
+      const ended: Array<{ sessionId: string; runtimes: Array<{ runtimeId: string; generation: number }> }> = [];
+      for (const session of targets) {
+        const runtimes = (listed.runtimes ?? []).filter(item => item.sessionId === session.id && !item.endedAt && ["creating", "running", "recovering", "terminating"].includes(item.state));
+        for (const runtime of runtimes) await runtimeService.terminate({ runtimeId: runtime.runtimeId, generation: runtime.generation } as never, actor);
+        application.endSession(session.id, { credentialId: actor.credentialId, actorSessionId: actor.sessionId, role: actor.role });
+        ended.push({ sessionId: session.id, runtimes: runtimes.map(({ runtimeId, generation }) => ({ runtimeId, generation })) });
+      }
+      return { ended };
+    },
     async sendMessage(request: any): Promise<any> {
       const actor = runtimeActor(request);
       return handler.send({
@@ -528,6 +752,70 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
           ? { kind: "direct", sessionId: request.targetSessionId, sessionIds: [request.targetSessionId] }
           : { kind: "broadcast", sessionIds: [] },
       });
+    },
+    async leadBroadcast(request: any): Promise<any> {
+      const actor = runtimeActor(request);
+      const idempotencyKey = typeof request.idempotencyKey === "string" ? request.idempotencyKey.trim() : "";
+      const body = typeof request.body === "string" ? request.body : "";
+      const channelIds: string[] = Array.isArray(request.channelIds) ? request.channelIds.map(String) : [];
+      const attachmentReferences = request.attachmentReferences == null ? [] : request.attachmentReferences;
+      if (!idempotencyKey || Buffer.byteLength(idempotencyKey, "utf8") > 512) throw new RoomsStoreError("invalidIdempotencyKey", "idempotencyKey must be 1-512 bytes");
+      if (!body.trim()) throw new RoomsStoreError("emptyMessage");
+      if (channelIds.length === 0 || channelIds.length > 100 || new Set(channelIds).size !== channelIds.length || channelIds.some(id => !id.trim())) throw new RoomsStoreError("invalidChannelIds", "channelIds must contain 1-100 distinct non-empty channel ids");
+      if (!Array.isArray(attachmentReferences) || attachmentReferences.length > 32 || attachmentReferences.some(value => typeof value !== "string" || !value.trim() || Buffer.byteLength(value, "utf8") > 2048)) throw new RoomsStoreError("invalidAttachmentReferences", "attachmentReferences must contain at most 32 non-empty references of at most 2048 bytes");
+      const results: any[] = [];
+      for (const channelId of channelIds) {
+        const channel = database.currentChannel(channelId);
+        if (!channel || channel.lifecycleState !== "active") {
+          results.push({ channelId, status: "unavailable", error: { code: channel ? "channelClosed" : "channelNotFound", message: `channel ${channelId} is unavailable` } });
+          continue;
+        }
+        const authorized = actor.role === "operator"
+          && (channel.ownerOperatorSessionId === actor.sessionId || database.isActiveMember(channelId, actor.sessionId, "operator"));
+        if (!authorized) {
+          results.push({ channelId, status: "unauthorized", error: { code: "channelAuthorizationRequired", message: `caller is not an owning or active operator of ${channelId}` } });
+          continue;
+        }
+        const deduplicationKey = `lead-broadcast:${actor.sessionId}:${idempotencyKey}:${channelId}`;
+        const prior = database.messageByDeduplicationKey(deduplicationKey, channelId)?.event as any;
+        if (prior?.deliveredRecipientSessionIds?.length > 0) {
+          results.push({ channelId, status: "sent", leadSessionId: prior.target?.sessionId, eventId: prior.id, wasDeduplicated: true });
+          continue;
+        }
+        const leads = database.roster(channelId).filter((member: any) => member.role === "planner" && !member.sessionEndedAt) as Array<{ sessionId: string }>;
+        if (leads.length !== 1) {
+          results.push({ channelId, status: "unavailable", error: { code: leads.length === 0 ? "leadUnavailable" : "leadAmbiguous", message: `channel ${channelId} has ${leads.length} current leads` } });
+          continue;
+        }
+        const leadSessionId = String(leads[0].sessionId);
+        try {
+          // Resolve liveness immediately before the canonical send. The send
+          // resolves it again and commits the current direct target, so a stale
+          // cached lead/runtime never enters this contract.
+          runtimeService.resolveActiveSessionRuntimeForDelivery(leadSessionId, actor);
+          const response = await handler.send({
+            ...request,
+            channelId,
+            senderSessionId: actor.sessionId,
+            body: stampRoomsProvenance(actor.sessionId, body),
+            target: { kind: "direct", sessionId: leadSessionId, sessionIds: [leadSessionId] },
+            correlation: {
+              requestId: idempotencyKey,
+              deduplicationKey,
+              purpose: "leadScopedMultiChannelBroadcast",
+              originSessionId: actor.sessionId,
+              targetSessionId: leadSessionId,
+            },
+            attachmentReferences: [...attachmentReferences],
+          }) as any;
+          results.push({ channelId, status: "sent", leadSessionId, eventId: response.event?.id, wasDeduplicated: response.wasDeduplicated === true });
+        } catch (error) {
+          const code = String((error as any)?.code ?? "deliveryFailed");
+          const unavailable = ["runtimeNotFound", "recipientUndeliverable", "noAcceptedRecipients"].includes(code);
+          results.push({ channelId, status: unavailable ? "unavailable" : "failed", leadSessionId, error: { code, message: error instanceof Error ? error.message : String(error) } });
+        }
+      }
+      return { idempotencyKey, results };
     },
     async suspendChannel(request: any): Promise<any> { return channelLifecycle.suspend(request.channelId, ownerActor(request, request.channelId)); },
     async resumeChannel(request: any): Promise<any> { return channelLifecycle.resume(request.channelId, ownerActor(request, request.channelId)); },
@@ -551,6 +839,18 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       return providerRegistryResponse();
     },
     async removeProvider(request: any): Promise<any> { ownerActor(request); removeProvider(request.name, stateDir); return providerRegistryResponse(); },
+    async listChannelProfileRevisions(request: any): Promise<any> {
+      const actor = authenticated(request);
+      if (!database.isActiveMember(request.channelId, actor)) throw new RoomsStoreError("notMember");
+      return { revisions: listChannelProfileRevisions(stateDir, request.channelId).map((profile) => ({
+        id: profile.id,
+        name: profile.name,
+        version: profile.version,
+        sha256: profile.sha256,
+        createdAt: profile.createdAt,
+        modelSkillSets: profile.modelSkillSets.map((set) => ({ id: set.id, provider: set.provider, model: set.model })),
+      })) };
+    },
     async resolveSessionRuntime(request: any): Promise<any> { const { credential: _, ...resolved } = await resolveSessionRuntime(request); return resolved; },
     async rotationInspect(request: any): Promise<any> { const actor = authenticated(request); if (database.sessionRoleValue(actor) !== "planner") throw new Error("rotationPlannerRequired"); return rotationService.inspect(request.channelId, request.sessionId); },
     async rotationPrepare(request: any): Promise<any> { const actorSessionId = authenticated(request); return rotationService.prepare({ channelId: request.channelId, sessionId: request.sessionId, actorSessionId }); },
@@ -572,8 +872,30 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
       const state = connection(request);
       const sessionId = request?.sessionId;
       if (!sessionId || !database.currentSession(sessionId)) throw new Error("unknown session");
+      const proof = typeof request?.proof === "string" ? Buffer.from(request.proof, "base64url") : Buffer.alloc(0);
+      // A live runtime's session proof still authenticates (internal work item). A
+      // trusted local operator client may instead prove possession of its
+      // durable owner-only operator credential, which survives daemon restarts.
+      // Both require a real 32-byte secret; a missing, forged, or cross-session
+      // proof stays denied because the operator secret lives only in a mode-0600
+      // file bound to that operator session.
+      const provesPossession = runtimeService.provesSessionPossession(sessionId, proof)
+        || (database.currentSession(sessionId)?.role === "operator" && operatorCredentials.verify(sessionId, proof));
+      if (!provesPossession) throw new Error("session possession proof is required");
       const credential = `rooms_${randomUUID()}`;
       state.credentials.set(credential, sessionId);
+      state.authenticatedSessionId = sessionId;
+      return { credential };
+    },
+    async issueBootstrapCredential(request: any): Promise<any> {
+      const state = connection(request);
+      const sessionId = typeof request?.sessionId === "string" ? request.sessionId : "";
+      if (!sessionId || database.sessionRoleValue(sessionId) !== "operator") throw new Error("owner operator bootstrap is required");
+      if (!runtimeRepository.legacyOperatorSessionsNeedingProof().includes(sessionId)) throw new Error("session proof bootstrap is unavailable");
+      if (!proofBootstrap.consume(sessionId, typeof request?.bootstrap === "string" ? request.bootstrap : "")) throw new Error("session proof bootstrap is invalid or expired");
+      const credential = `rooms_${randomUUID()}`;
+      state.credentials.set(credential, sessionId);
+      (state.bootstrapCredentials ??= new Map()).set(credential, sessionId);
       state.authenticatedSessionId = sessionId;
       return { credential };
     },
@@ -605,18 +927,20 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     replaceSession: unsupported("replaceSession"),
     async search(request: any): Promise<any> {
       const limit = queryLimit(request.limit);
-      const query = String(request.query ?? "").toLowerCase();
+      const query = String(request.query ?? "");
       const scope = request.scope ?? (request.channelId ? "channel" : "all");
       if (scope !== "channel" && scope !== "all") throw new RoomsStoreError("invalidSearchScope", "search scope must be channel or all");
       if (scope === "channel" && !String(request.channelId ?? "").trim()) throw new RoomsStoreError("invalidChannel", "channel search requires channelId");
-      const changes = database.replay("0", scope === "channel" ? request.channelId : undefined);
-      const events = changes
-        .reverse()
-        .filter((change: any) => change.kind === "message.sent")
-        .map((change: any) => change.payload)
-        .filter((event: any) => String(event.body ?? "").toLowerCase().includes(query))
-        .slice(0, limit);
-      return { events };
+      const events = request.includeEvents === false
+        ? []
+        : database.searchMessages(query, { channelId: scope === "channel" ? request.channelId : null, limit }).events;
+      if (!request.includeChannelDigests) return { events, channels: [] };
+      const channels = database.searchChannels(query, {
+        limit,
+        includeControl: request.includeControl !== false,
+        activeOnly: Boolean(request.activeOnly),
+      });
+      return { events, channels: scope === "channel" ? channels.filter((hit) => hit.channelId === request.channelId) : channels };
     },
     async getRecipients(request: any): Promise<any> {
       const changes = database.replay("0", undefined);
@@ -645,7 +969,21 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
         }
       } finally { remove(); }
     }, suspend: unsupported("suspend"), resume: unsupported("resume"),
-    runtimeCreate: (request: any) => runtimeService.create(request, runtimeActor(request)),
+    runtimeCreate: async (request: any) => {
+      const consumedBootstrap = consumedBootstrapActor(request);
+      try {
+        const resolved = runtimeCreateActor(request);
+        const result = await runtimeService.create(request, resolved.actor);
+        if (resolved.bootstrap) revokeBootstrapCredential(request, resolved.actor);
+        return result;
+      } catch (error) {
+        if (consumedBootstrap) {
+          revokeBootstrapCredential(request, consumedBootstrap);
+          proofBootstrap.rearm(consumedBootstrap.sessionId);
+        }
+        throw error;
+      }
+    },
     runtimeList: async (request: any) => runtimeService.list(request, runtimeActor(request)),
     runtimeStatus: async (request: any) => runtimeService.status(request, runtimeActor(request)),
     runtimeAttach: (request: any) => runtimeService.attach(request, runtimeActor(request)),
@@ -690,11 +1028,13 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
     runtimeQuotaSet: async (request: any) => ({ quota: runtimeService.setActiveRuntimeQuota(request.machineId, request.limit, runtimeActor(request)) }),
     runtimeQuotaReset: async (request: any) => ({ quota: runtimeService.resetActiveRuntimeQuota(request.machineId, runtimeActor(request)) }),
   };
+  providerReplyBridge.start();
   return {
     database,
     handler,
     runtimeService,
     providerReplyBridge,
+    homeAuthorityId,
     relayHandlerFactory: federation ? () => federation.withMachineInventory({
       base: federation.withChannelHomeRouting({
         base: federation.createTerminalRuntimeHandler(runtimeService, homeAuthorityId, stateDir),
@@ -710,22 +1050,32 @@ export function createNativeComposition(databasePath: string, hostExecutable = p
   };
 }
 
-async function acceptPreloadedGeminiPrompt(input: Readonly<{
+async function acceptPreloadedProviderPrompt(input: Readonly<{
   adapterKind: string;
-  providerThreadId: string;
+  providerThreadId: string | null;
   prompt: string;
-  scanState: ProviderReplyScanState;
+  scanState: ProviderReplyScanState | null;
+  homeDirectory: string | null;
   timeoutMs: number;
+  resolveProviderThreadId(): string | null;
   commit: () => unknown;
 }>): Promise<{ verified: boolean; attempts: number }> {
   const deadline = Date.now() + input.timeoutMs;
+  let providerThreadId = input.providerThreadId;
   let state = input.scanState;
   while (Date.now() <= deadline) {
+    providerThreadId ??= input.resolveProviderThreadId();
+    if (!providerThreadId) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      continue;
+    }
+    state ??= { offsets: {}, inputSeen: false, candidateText: null, completed: false, completedAt: null, failureReason: null };
     const observed = scanProviderFinalReply({
       adapterKind: input.adapterKind,
-      providerThreadId: input.providerThreadId,
+      providerThreadId,
       state,
       expectedInput: input.prompt,
+      homeDirectory: input.homeDirectory ?? undefined,
     });
     state = observed.state;
     if (state.inputSeen) {
@@ -734,7 +1084,7 @@ async function acceptPreloadedGeminiPrompt(input: Readonly<{
     }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  throw new Error(`session ${input.providerThreadId} did not record its managed prompt within ${input.timeoutMs}ms`);
+  throw new Error(`session ${providerThreadId ?? "pending"} did not record its managed prompt within ${input.timeoutMs}ms`);
 }
 
 function launchIdentity(options: Readonly<Record<string, unknown>>): { model: string | null; reasoning: string | null } {

@@ -8,8 +8,9 @@ export type ManagedProviderLaunch = Readonly<{
 }>;
 
 /**
- * Gemini can own a session id before its TUI starts. Its initial interactive
- * prompt flag also avoids losing input during late startup screen repaints.
+ * Start providers with their supported initial-prompt argument when possible.
+ * This keeps the first prompt in the provider's launch contract instead of
+ * racing terminal setup through a later PTY write.
  */
 export function prepareManagedProviderLaunch(input: Readonly<{
   adapterKind: string;
@@ -17,6 +18,13 @@ export function prepareManagedProviderLaunch(input: Readonly<{
   prompt: string;
   createThreadId?: () => string;
 }>): ManagedProviderLaunch {
+  if (input.adapterKind === "codex") {
+    return {
+      arguments: [...input.arguments, input.prompt],
+      providerThreadId: null,
+      promptPreloaded: true,
+    };
+  }
   if (input.adapterKind !== "gemini") {
     return { arguments: [...input.arguments], providerThreadId: null, promptPreloaded: false };
   }

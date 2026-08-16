@@ -73,6 +73,9 @@ export function createSshRelayDuplex(sshHost: string, options?: SshRelayTranspor
 
   child.stdout.on("data", (chunk: Buffer) => onDataCb?.(chunk));
   child.stdin.on("drain", () => onDrainCb?.());
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+    settleClose({ reason: "transportError", message: `ssh relay input closed: ${error.message}` });
+  });
   child.stderr.on("data", (chunk: Buffer) => {
     if (stderrBytes >= MAX_SSH_RELAY_STDERR_BYTES) return;
     stderrBytes += chunk.length;

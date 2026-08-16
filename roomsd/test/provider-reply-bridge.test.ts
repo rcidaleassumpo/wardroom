@@ -87,7 +87,7 @@ describe("provider reply bridge", () => {
       appendFileSync(transcript, `${JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "native question" }] } })}\n`);
       appendFileSync(transcript, `${JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "Native answer" } })}\n`);
 
-      composition.providerReplyBridge.tick();
+      await composition.providerReplyBridge.tick();
 
       const replies = (composition.database.snapshot("proof").events as Array<Record<string, unknown>>)
         .filter((event) => event.replyToEventId === sent.event.id);
@@ -136,7 +136,7 @@ describe("provider reply bridge", () => {
     }
   });
 
-  it("publishes a provider final answer once with canonical reply metadata", () => {
+  it("publishes a provider final answer once with canonical reply metadata", async () => {
     const { database, application, runtime } = setup();
     const directory = mkdtempSync(join(tmpdir(), "rooms-provider-bridge-"));
     const transcript = join(directory, "codex.jsonl");
@@ -166,8 +166,8 @@ describe("provider reply bridge", () => {
     appendFileSync(transcript, `${JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "what is the status?" }] } })}\n`);
     appendFileSync(transcript, `${JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "All done" } })}\n`);
 
-    bridge.tick();
-    bridge.tick();
+    await bridge.tick();
+    await bridge.tick();
 
     const events = database.snapshot("proof").events as Array<Record<string, unknown>>;
     const replies = events.filter((event) => event.replyToEventId === sourceEvent.id);
@@ -182,7 +182,31 @@ describe("provider reply bridge", () => {
     database.close();
   });
 
-  it("does not duplicate a provider that already replied through Rooms", () => {
+  it("publishes a managed worker final answer to the active lead", async () => {
+    const { database, application, runtime } = setup();
+    database.insertSession({ id: "planner", role: "planner", deliveryMode: "log" });
+    database.insertMembership("proof", "planner", "planner");
+    database.updateChannelCoordinationPolicy("proof", "lead-upstream");
+    const directory = mkdtempSync(join(tmpdir(), "rooms-provider-bridge-upstream-"));
+    const transcript = join(directory, "codex.jsonl");
+    writeFileSync(transcript, "");
+    const source = application.commitMessage({ channelId: "proof", senderSessionId: "operator", body: "report", target: { kind: "direct", sessionId: "provider", sessionIds: ["provider"] } });
+    const sourceEvent = source.event as { id: string };
+    const bridge = new ProviderReplyBridge(database, application);
+    bridge.enqueue({ sourceEventId: sourceEvent.id, sourceCursor: source.cursor, sourceBody: "report", channelId: "proof", sourceSenderSessionId: "operator", providerSessionId: "provider", runtimeId: runtime.runtimeId, generation: runtime.generation, adapterKind: "codex", providerThreadId: transcript, scanState: captureProviderReplyScanState("codex", transcript) });
+    appendFileSync(transcript, `${JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "report" }] } })}\n`);
+    appendFileSync(transcript, `${JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "Managed answer" } })}\n`);
+
+    await bridge.tick();
+
+    const replies = (database.snapshot("proof").events as Array<Record<string, unknown>>).filter((event) => event.replyToEventId === sourceEvent.id);
+    expect(replies).toMatchObject([{ senderSessionId: "provider", body: "Managed answer", target: { kind: "direct", sessionId: "planner" } }]);
+    bridge.stop();
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("does not duplicate a provider that already replied through Rooms", async () => {
     const { database, application, runtime } = setup();
     const directory = mkdtempSync(join(tmpdir(), "rooms-provider-bridge-skip-"));
     const transcript = join(directory, "codex.jsonl");
@@ -218,7 +242,7 @@ describe("provider reply bridge", () => {
     appendFileSync(transcript, `${JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "answer this" }] } })}\n`);
     appendFileSync(transcript, `${JSON.stringify({ type: "event_msg", payload: { type: "task_complete", last_agent_message: "Terminal duplicate" } })}\n`);
 
-    bridge.tick();
+    await bridge.tick();
 
     const events = database.snapshot("proof").events as Array<Record<string, unknown>>;
     expect(events.filter((event) => event.replyToEventId === sourceEvent.id)).toHaveLength(1);
@@ -227,7 +251,7 @@ describe("provider reply bridge", () => {
     database.close();
   });
 
-  it("ends a job when the provider never records the delivered input", () => {
+  it("ends a job when the provider never records the delivered input", async () => {
     const { database, application, runtime } = setup();
     const directory = mkdtempSync(join(tmpdir(), "rooms-provider-bridge-dropped-input-"));
     const transcript = join(directory, "codex.jsonl");
@@ -256,7 +280,7 @@ describe("provider reply bridge", () => {
     database.db.prepare("UPDATE provider_reply_jobs SET created_at=? WHERE source_event_id=?")
       .run("2026-01-01T00:00:00.000Z", sourceEvent.id);
 
-    bridge.tick();
+    await bridge.tick();
 
     expect(database.db.prepare("SELECT state, outcome_reason FROM provider_reply_jobs WHERE source_event_id=?").get(sourceEvent.id))
       .toEqual({ state: "failed", outcome_reason: "provider-input-not-observed" });

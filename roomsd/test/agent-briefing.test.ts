@@ -27,14 +27,6 @@ describe("Rooms-owned agent briefing", () => {
     expect(text).toContain("Use `rooms channel members <channel>` only when a fresh roster is needed");
   });
 
-  it("states the mapped name without replacing the routing identity", () => {
-    const text = composeRoomsAgentBriefing({ sessionId: "claude-agent-123", displayName: "Noah", channel: "c1" });
-
-    expect(text).toContain("Your mapped name is Noah");
-    expect(text).toContain("your Rooms session ID is claude-agent-123");
-    expect(text).toContain("Answer to Noah");
-  });
-
   it("omits an empty goal instead of presenting setup flags as work", () => {
     const text = composeRoomsAgentBriefing({ sessionId: "s1", channel: "c1", goal: "" });
 

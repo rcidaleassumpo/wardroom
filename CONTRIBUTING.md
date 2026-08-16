@@ -65,10 +65,13 @@ go vet ./...
 ```
 
 Pull requests run the TypeScript checks on Linux and Apple Silicon macOS. CI
-runs the Go build, tests, and vet natively on macOS, cross-builds the supported
-`darwin-arm64` binary from Linux, and builds an unpublished local-proof release
-with an official SEA-enabled Node distribution. The Go runtime host does not
-yet have a Linux PTY adapter.
+runs the Go build, tests, and vet natively on macOS. It cross-builds the
+supported `darwin-arm64` binary from Linux. CI also builds an unpublished
+local-proof release with the checksum-pinned official Node distribution.
+`npm run build:release` downloads that builder into the user cache when needed.
+It checks the release pin and SEA fuse before each build.
+
+The Go runtime host does not yet have a Linux PTY adapter.
 
 ## Changes to the protocol
 

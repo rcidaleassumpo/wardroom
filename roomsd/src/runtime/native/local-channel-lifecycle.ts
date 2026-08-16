@@ -93,6 +93,7 @@ export class LocalChannelLifecycle {
           adapterKind: input.adapterKind,
           providerThreadId: member?.provider?.conversationId ?? null,
           cwd: input.launch.cwd,
+          effectiveHome: input.launch.home ?? member?.launch.home ?? null,
           command: [input.launch.executable, ...input.launch.args],
         } as never, actor) as { runtime?: { runtimeId?: string; sessionId?: string; providerThreadId?: string | null } };
         if (!launched.runtime?.runtimeId) throw new Error("resumed runtime did not return an identity");

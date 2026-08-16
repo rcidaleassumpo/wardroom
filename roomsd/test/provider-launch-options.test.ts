@@ -15,6 +15,12 @@ describe("provider launch option contract", () => {
     expect(JSON.stringify(schema)).not.toMatch(/api.?key|token|auth|--approval-mode/i);
   });
 
+  it("advertises a controlled profile only for Codex and never turns it into provider argv", () => {
+    expect(providerLaunchOptionsSchema("codex").properties.profile).toMatchObject({ type: "string" });
+    expect(providerLaunchOptionsSchema("claude").properties.profile).toBeUndefined();
+    expect(providerLaunchArguments("codex", "codex", { profile: "revision-1", permissions: "manual" })).toEqual([]);
+  });
+
   it("validates options and translates Gemini through the agy adapter", () => {
     expect(providerLaunchArguments("gemini", "agy", { permissions: "headless", model: "gemini-2.5-pro" })).toEqual([
       "--model", "gemini-2.5-pro", "--dangerously-skip-permissions",
@@ -32,6 +38,15 @@ describe("provider launch option contract", () => {
   it("merges stored defaults with per-launch overrides", () => {
     expect(providerLaunchArguments("codex", "codex", { reasoningEffort: "low" }, { permissions: "manual", model: "gpt-default" })).toEqual([
       "-c", "model_reasoning_effort=low", "--model", "gpt-default",
+    ]);
+  });
+
+  it("bypasses hook trust for an unattended Codex launch", () => {
+    expect(providerLaunchArguments("codex", "codex", { permissions: "headless" })).toEqual([
+      "--dangerously-bypass-hook-trust", "--yolo",
+    ]);
+    expect(providerLaunchArguments("codex", "codex", { permissions: "headless" }, {}, ["--sandbox=read-only"])).toEqual([
+      "--dangerously-bypass-hook-trust", "--sandbox=read-only",
     ]);
   });
 });

@@ -11,6 +11,12 @@ export interface AllowlistedLaunchConfig {
   executable: string;
   args: readonly string[];
   cwd: string;
+  /**
+   * Session generated home root, user-home-shaped (provider dot-dirs under
+   * it). Absent or null means the ambient user home. A resumed generation
+   * must reuse it: the provider transcript lives inside this home.
+   */
+  home?: string | null;
   /** Deliberately no environment map: secrets and arbitrary env are not durable state. */
 }
 

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CommitMessageInput, ListMessagesInput, ListRepliesInput, RoomsCLIBackend, SendPromptInput, SessionCreateInput, SessionRegisterInput, ShowMessageInput } from "./backend.js";
 import { createDefaultRoomsCLIBackend } from "./default-backend.js";
@@ -21,11 +23,18 @@ import { providerLaunchCommand } from "./codex-session-import.js";
 import { argsAlreadySetReasoningEffort, parseReasoningEffort, reasoningEffortArguments, type ReasoningEffort } from "./reasoning-effort.js";
 import { launchPermissionArguments, parseLaunchPermissionMode } from "./launch-permissions.js";
 import { applyCodexNakedProfile, listCodexSkills } from "./codex-minimal-profile.js";
+import { loadCodexControlledProfileFile, materializeCodexControlledHome, withControlledCodexHome } from "./codex-controlled-home.js";
+import { materializeClaudeControlledLaunch } from "./claude-controlled-launch.js";
+import { resolveRoomsStateDir } from "../identity/machine-identity.js";
+import { planSessionResume } from "./session-resume.js";
+import { mintOperatorCredential, operatorCredentialPath } from "../credentials/operator-credential.js";
 import { discoverProviders, inspectProvider, listRegisteredProviders, providerName, registerProvider, registeredProvider, removeProvider, updateProvider, type ProviderRegistrationInput, type RoomsProvider } from "./provider-registry.js";
 import { providerLaunchArguments, providerLaunchOptionsSchema, type ProviderLaunchOptions } from "./provider-launch-options.js";
 import { runRoomsService, type RoomsServiceCommand } from "../provisioning/launchd.js";
 import { formatRoomsVersion } from "../provisioning/version.js";
 import { runRoomsMcpStdio } from "../mcp/stdio.js";
+import { createChannelProfileRevision, listChannelProfileRevisions } from "../profiles/profile-revision-store.js";
+import { readChannelProfileRevision } from "../profiles/profile-revision-store.js";
 
 const VERSION = "0.1.0";
 
@@ -41,6 +50,7 @@ export function createSessionId(): string {
 type Parsed = {
   positionals: string[];
   flags: Map<string, string>;
+  repeated: Map<string, string[]>;
 };
 
 export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBackend): Promise<string> {
@@ -55,6 +65,8 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
 
   const parsed = argv[0] === "run" && argv[1] ? parseProviderInvocation(argv) : parse(argv);
   const [scope, command, name] = parsed.positionals;
+  if (scope === "profile" && command === "create") return formatResult(createProfileFromCLI(parsed.flags, parsed.repeated));
+  if (scope === "profile" && command === "list") return formatResult({ revisions: listChannelProfileRevisions(parsed.flags.get("state-dir") ?? resolveRoomsStateDir(), required(parsed.flags, "channel")) });
   if (scope === "setup" && (command === undefined || command === "status")) {
     return formatResult(runRoomsSetup(command === "status" ? "status" : "setup", parsed.flags.get("state-dir")));
   }
@@ -130,8 +142,10 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   } else if (scope === "run" && command) {
     if (command === "codex" && parsed.flags.has("naked") && parsed.positionals[2] === "list-skills") {
       result = { lines: listCodexSkills().map(skill => `${skill.name}\t${skill.path}`) };
-    } else if (parsed.flags.has("native")) result = await runRoomsProvider(command, [...parsed.positionals.slice(2), "--native"]);
-    else result = await runRoomsSession(providerName(command), parsed.positionals.slice(2), resolvedBackend, parsed.flags);
+    } else if (parsed.flags.has("native")) {
+      const controlled = nativeControlledLaunch(command, parsed.flags.get("controlled-profile"));
+      result = await runRoomsProvider(command, [...parsed.positionals.slice(2), ...controlled.args, "--native"], controlled.env, controlled.scrubEnv);
+    } else result = await runRoomsSession(providerName(command), parsed.positionals.slice(2), resolvedBackend, parsed.flags);
   } else if (scope === "shellenv") {
     const shellCommand = command ?? "print";
     if (!["install", "uninstall", "status", "print"].includes(shellCommand)) throw new Error(`unknown shellenv command\n\n${usage()}`);
@@ -157,6 +171,15 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     if (!resolvedBackend.channelSend) throw new Error("channel messaging support is unavailable");
     const replyToEventId = optionalReplyTo(parsed.flags);
     result = await resolvedBackend.channelSend({ channel: name, sender: process.env.ROOMS_SESSION_ID || "", body: required(parsed.flags, "body"), ...(replyToEventId ? { replyToEventId } : {}) });
+  } else if (scope === "channel" && command === "lead-broadcast") {
+    if (!resolvedBackend.leadBroadcast) throw new Error("lead broadcast support is unavailable");
+    result = await resolvedBackend.leadBroadcast({
+      credential: parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? "",
+      idempotencyKey: required(parsed.flags, "idempotency-key"),
+      body: required(parsed.flags, "body"),
+      channelIds: jsonArray(required(parsed.flags, "channels-json")),
+      attachmentReferences: parsed.flags.has("attachments-json") ? jsonArray(required(parsed.flags, "attachments-json")) : [],
+    });
   } else if (scope === "control" && command === "commit") {
     if (!resolvedBackend.commitControl) throw new Error("control commit support is unavailable");
     result = await resolvedBackend.commitControl({
@@ -185,7 +208,7 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     }
   } else if (scope === "session" && command === "end" && name) {
     if (!resolvedBackend.endSession) throw new Error("session lifecycle support is unavailable");
-    const credential = required(parsed.flags, "credential");
+    const credential = parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? required(parsed.flags, "credential");
     if (resolvedBackend.runtimeTerminateSession) {
       try { await resolvedBackend.runtimeTerminateSession(name, credential); }
       catch (error) { if (!(error instanceof Error) || !/has no active Rooms runtime/.test(error.message)) throw error; }
@@ -198,6 +221,20 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     result = await resolvedBackend.createChannel({ name, credential: parsed.flags.get("credential") });
   } else if (scope === "channel" && command === "list") {
     result = await resolvedBackend.listChannels();
+  } else if ((scope === "channel" || scope === "message") && command === "search") {
+    if (!resolvedBackend.search) throw new Error("search support is unavailable");
+    if (!name?.trim()) throw new Error(`rooms ${scope} search requires a query`);
+    result = await resolvedBackend.search({
+      query: name,
+      channel: parsed.flags.get("channel") ?? null,
+      limit: boundedLimit(parsed.flags.get("limit"), DEFAULT_SEARCH_LIMIT),
+      // A channel search answers "which channel was this?", so it reports the
+      // channels. A message search answers "what was said?".
+      channelDigests: scope === "channel",
+      events: scope === "message",
+      includeControl: !booleanFlag(parsed.flags, "messages-only"),
+      activeOnly: booleanFlag(parsed.flags, "active-only"),
+    });
   } else if (scope === "channel" && command === "label" && name) {
     if (!resolvedBackend.labelChannel) throw new Error("channel labeling support is unavailable");
     if (!parsed.flags.has("label")) throw new Error("rooms channel label requires --label <text>; pass an empty value to clear it");
@@ -241,7 +278,7 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     }
   } else if (scope === "session" && command === "create") {
     const input: SessionCreateInput = {
-      credential: required(parsed.flags, "credential"),
+      credential: parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? required(parsed.flags, "credential"),
       channel: required(parsed.flags, "channel"),
       name: required(parsed.flags, "name"),
       agent: codexAgent(required(parsed.flags, "agent")),
@@ -262,8 +299,11 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     const executable = resolvedBackend.providerExecutable?.(agent) ?? registration?.executable ?? agent;
     const adapter = registration?.adapter ?? (agent === "gemini" ? "agy" : agent);
     const translatedArgs = providerLaunchArguments(agent, adapter, options, registration?.defaults ?? {}, providerArgs);
+    const controlled = options.profile === undefined
+      ? null
+      : materializeSelectedCodexProfile({ agent, channel, sessionId: name, cwd: parsed.flags.get("cwd") ?? process.cwd(), options, translatedArgs, executable, stateDir: parsed.flags.get("state-dir") });
     const input: SessionCreateInput = {
-      credential: required(parsed.flags, "credential"),
+      credential: parsed.flags.get("credential") ?? process.env.ROOMS_SESSION_ID ?? required(parsed.flags, "credential"),
       channel,
       name,
       agent,
@@ -271,7 +311,10 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
       role,
       cwd: parsed.flags.get("cwd") ?? process.cwd(),
       prompt,
-      command: [executable, ...translatedArgs],
+      command: controlled?.command ?? [executable, ...translatedArgs],
+      externalOwner: parsed.flags.get("external-owner") ?? null,
+      externalAgentId: parsed.flags.get("external-agent-id") ?? null,
+      ...(controlled ? { effectiveHome: controlled.effectiveHome } : {}),
     };
     let launched = false;
     try {
@@ -283,7 +326,7 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
       // Prefix the first prompt with the Rooms session id so concurrent
       // same-cwd provider-thread discovery can claim only this launch's
       // transcript (ownershipMarker in create() matches this exact line).
-      const launchPrompt = `You are a Rooms session ${name}.\n\n${prompt}`;
+      const launchPrompt = controlled ? prompt : `You are a Rooms session ${name}.\n\n${prompt}`;
       const delivery = await deliverLaunchPrompt(
         resolvedBackend,
         { credential: input.credential, channel, session: name, prompt: launchPrompt },
@@ -329,6 +372,36 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
   } else if (scope === "session" && command === "list") {
     if (!resolvedBackend.listSessions) throw new Error("session list is unavailable");
     result = await resolvedBackend.listSessions({ includeEnded: booleanFlag(parsed.flags, "all") });
+  } else if (scope === "session" && command === "resume" && name) {
+    // Non-interactive recovery: relaunch one session detached, resuming its
+    // stored provider thread at the next generation. Preserves the existing
+    // generation, refuses missing or ambiguous session state, and is idempotent.
+    if (!resolvedBackend.runtimeCreate) throw new Error("runtime support is unavailable");
+    const plan = planSessionResume(name, parsed.flags.get("state-dir"), parsed.flags.get("channel"));
+    if (plan.alreadyRunning) {
+      result = { sessionId: name, generation: plan.generation, providerThreadId: plan.providerThreadId, alreadyRunning: true };
+    } else {
+      const created = await resolvedBackend.runtimeCreate({
+        credential: required(parsed.flags, "credential"),
+        sessionId: name,
+        generation: plan.generation,
+        stateDir: parsed.flags.get("state-dir"),
+        command: plan.command,
+        cwd: plan.cwd ?? undefined,
+        effectiveHome: plan.effectiveHome,
+        channelId: plan.channelId ?? undefined,
+        adapterKind: plan.adapterKind,
+        providerThreadId: plan.providerThreadId,
+      });
+      result = { ...(created as Record<string, unknown>), sessionId: name, generation: plan.generation, providerThreadId: plan.providerThreadId, resumed: true };
+    }
+  } else if (scope === "operator-credential" && (command === "issue" || command === "rotate")) {
+    // Mint or rotate the durable owner-only operator credential. Prints only the
+    // file reference, never the secret, so it never lands in logs or receipts.
+    const session = required(parsed.flags, "session");
+    const stateDir = resolveRoomsStateDir(parsed.flags.get("state-dir") ?? process.env.ROOMS_STATE_DIR);
+    mintOperatorCredential(stateDir, session, { rotate: command === "rotate" });
+    result = { operatorSessionId: session, credentialReference: operatorCredentialPath(stateDir, session), minted: true };
   } else if ((scope === "session" || scope === "sessions") && command === "attach" && name) {
     if (parsed.flags.has("json")) throw new Error("session attach is interactive and does not support --json");
     if (!resolvedBackend.runtimeResolveSessionAttach || !resolvedBackend.runtimeAttachInteractive) throw new Error("interactive session attach is unavailable");
@@ -361,10 +434,15 @@ export async function runRoomsCLI(argv: readonly string[], backend?: RoomsCLIBac
     result = await resolvedBackend.commitMessage(input);
   } else if (scope === "message" && command === "list") {
     const replyToEventId = optionalReplyTo(parsed.flags);
+    // A caller holding only a channel can read it. Requiring a session forced
+    // a roster lookup first for no authority gain.
+    const channel = parsed.flags.get("channel") ?? null;
+    const session = parsed.flags.get("session") ?? null;
+    if (!session && !channel) throw new Error("rooms message list requires --session <session> or --channel <name>");
     const input: ListMessagesInput = {
-      session: required(parsed.flags, "session"),
+      session: session ?? "",
       since: parsed.flags.get("since") ?? "0",
-      channel: parsed.flags.get("channel") ?? null,
+      channel,
       limit: boundedLimit(parsed.flags.get("limit")),
       ...(replyToEventId ? { replyToEventId } : {}),
     };
@@ -511,6 +589,7 @@ async function loadBackend(): Promise<RoomsCLIBackend> {
 function parse(argv: readonly string[]): Parsed {
   const positionals: string[] = [];
   const flags = new Map<string, string>();
+  const repeated = new Map<string, string[]>();
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!;
     if (token === "--") {
@@ -523,7 +602,7 @@ function parse(argv: readonly string[]): Parsed {
     }
     const equals = token.indexOf("=");
     if (equals > 2) {
-      flags.set(token.slice(2, equals), token.slice(equals + 1));
+      setParsedFlag(flags, repeated, token.slice(2, equals), token.slice(equals + 1));
       continue;
     }
     if (token === "--json" || token === "--native") {
@@ -538,13 +617,20 @@ function parse(argv: readonly string[]): Parsed {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) {
       if (token === "--reply-to" || token === "--reply-to-event") throw new Error(`${token} requires an event id`);
-      flags.set(token.slice(2), "true");
+      setParsedFlag(flags, repeated, token.slice(2), "true");
       continue;
     }
-    flags.set(token.slice(2), value);
+    setParsedFlag(flags, repeated, token.slice(2), value);
     index += 1;
   }
-  return { positionals, flags };
+  return { positionals, flags, repeated };
+}
+
+function setParsedFlag(flags: Map<string, string>, repeated: Map<string, string[]>, name: string, value: string): void {
+  flags.set(name, value);
+  const values = repeated.get(name) ?? [];
+  values.push(value);
+  repeated.set(name, values);
 }
 
 /**
@@ -555,7 +641,8 @@ function parse(argv: readonly string[]): Parsed {
 export function parseProviderInvocation(argv: readonly string[]): Parsed {
   const positionals = [argv[0]!, argv[1]!];
   const flags = new Map<string, string>();
-  const valueFlags = new Set(["credential", "channel", "name", "prompt", "cwd", "goal", "role", "effort", "permissions", "provider-options-json", "state-dir"]);
+  const repeated = new Map<string, string[]>();
+  const valueFlags = new Set(["credential", "channel", "name", "prompt", "cwd", "goal", "role", "effort", "permissions", "provider-options-json", "state-dir", "controlled-profile"]);
   for (let index = 2; index < argv.length; index += 1) {
     const token = argv[index]!;
     // Everything after a bare `--` belongs to the provider verbatim, so a
@@ -567,29 +654,77 @@ export function parseProviderInvocation(argv: readonly string[]): Parsed {
     const equals = token.startsWith("--") ? token.indexOf("=") : -1;
     const key = equals > 2 ? token.slice(2, equals) : token.startsWith("--") ? token.slice(2) : "";
     if (key === "native" || key === "naked") {
-      flags.set(key, equals > 2 ? token.slice(equals + 1) : "true");
+      setParsedFlag(flags, repeated, key, equals > 2 ? token.slice(equals + 1) : "true");
       continue;
     }
     if (valueFlags.has(key)) {
       if (equals > 2) {
-        flags.set(key, token.slice(equals + 1));
+        setParsedFlag(flags, repeated, key, token.slice(equals + 1));
         continue;
       }
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) throw new Error(`--${key} requires a value`);
-      flags.set(key, value);
+      setParsedFlag(flags, repeated, key, value);
       index += 1;
       continue;
     }
     positionals.push(token);
   }
-  return { positionals, flags };
+  return { positionals, flags, repeated };
 }
 
 function required(flags: Map<string, string>, name: string): string {
   const value = flags.get(name);
   if (!value) throw new Error(`--${name} is required`);
   return value;
+}
+
+function createProfileFromCLI(flags: Map<string, string>, repeated: Map<string, string[]>) {
+  const stateDir = flags.get("state-dir") ?? resolveRoomsStateDir();
+  const channelId = required(flags, "channel");
+  const displayName = required(flags, "name").trim();
+  const instructionsInput = required(flags, "instructions");
+  const instructions = existsSync(instructionsInput) ? readFileSync(instructionsInput, "utf8") : instructionsInput;
+  const skillNames = repeated.get("skill") ?? [];
+  const models = repeated.get("model") ?? [];
+  if (models.length === 0) throw new Error("rooms profile create requires at least one --model");
+  const installedSkillsRoot = join(homedir(), ".agents", "skills");
+  const skills = skillNames.map((skillName) => {
+    if (!/^[A-Za-z0-9._-]+$/.test(skillName)) throw new Error(`invalid installed skill name: ${skillName}`);
+    const path = join(installedSkillsRoot, skillName);
+    if (!existsSync(join(path, "SKILL.md"))) throw new Error(`installed skill is missing: ${skillName}`);
+    return { id: skillName, name: skillName, path };
+  });
+  const prior = listChannelProfileRevisions(stateDir, channelId);
+  const version = (prior[0]?.version ?? 0) + 1;
+  const id = `profile-${randomUUID()}`;
+  const creator = process.env.ROOMS_SESSION_ID ?? required(flags, "credential");
+  return createChannelProfileRevision({
+    stateDir,
+    id,
+    name: displayName,
+    channelId,
+    version,
+    createdAt: new Date().toISOString(),
+    createdBySessionId: creator,
+    instructions: { id: "channel-instructions", text: instructions, sourcePath: existsSync(instructionsInput) ? realpathSync(instructionsInput) : null },
+    projectInstructions: { mode: "exclude" },
+    modelSkillSets: models.map((model) => ({
+      id: `codex-${model.replace(/[^A-Za-z0-9._-]/g, "-")}`,
+      provider: "codex",
+      model,
+      catalogVersion: "user-composed-v1",
+      authMode: "subscription",
+      skills,
+      allowedBuiltinTools: [],
+      providerSpecificResolvedItems: [],
+      toolEnvironment: {
+        npmUserConfig: booleanFlag(flags, "npm-userconfig"),
+        browserRuntime: booleanFlag(flags, "browser-runtime"),
+        sandyboxySandbox: flags.get("sandyboxy") ?? null,
+      },
+    })),
+  });
 }
 
 function optionalReplyTo(flags: ReadonlyMap<string, string>): string | undefined {
@@ -602,6 +737,7 @@ function optionalReplyTo(flags: ReadonlyMap<string, string>): string | undefined
 }
 
 export const DEFAULT_MESSAGE_LIST_LIMIT = 50;
+export const DEFAULT_SEARCH_LIMIT = 20;
 
 export function boundedLimit(value: string | undefined, fallback = DEFAULT_MESSAGE_LIST_LIMIT): number {
   if (value === undefined) return fallback;
@@ -658,12 +794,17 @@ async function runRoomsSession(provider: RoomsProvider, args: readonly string[],
     await backend.createChannel({ name: channel, credential });
     createdChannel = true;
   }
-  const displayName = flags.get("display-name") ?? null;
-  await backend.registerSession({ channel, name: session, displayName, role: (flags.get("role") ?? "worker") as "operator" | "planner" | "worker" | "reviewer", externalId: null });
+  await backend.registerSession({ channel, name: session, role: (flags.get("role") ?? "worker") as "operator" | "planner" | "worker" | "reviewer", externalId: null });
   const registration = registeredProvider(provider, flags.get("state-dir"));
   const providerArgs = providerLaunchArguments(provider, registration.adapter, launchOptions(flags), registration.defaults, providerArguments(provider, args, flags));
   const executable = registration.executable;
-  const command = providerLaunchCommand(provider, providerArgs, resumeThreadId, undefined, executable);
+  let command = providerLaunchCommand(provider, providerArgs, resumeThreadId, undefined, executable);
+  const controlledProfile = flags.get("controlled-profile");
+  if (controlledProfile) {
+    const stateDir = resolveRoomsStateDir(flags.get("state-dir") ?? process.env.ROOMS_STATE_DIR);
+    const sessionDir = join(stateDir, "controlled", session);
+    command = controlledProviderCommand(provider, command, controlledProfile, sessionDir, stateDir);
+  }
   await backend.createSession({ credential, channel, name: session, agent: provider, adapter: registration.adapter, cwd: flags.get("cwd") ?? process.cwd(), prompt, command, providerThreadId: resumeThreadId ?? null });
   const briefingReadyAt = Date.now() + 1_000;
   const roster = backend.channelMembers
@@ -684,7 +825,7 @@ async function runRoomsSession(provider: RoomsProvider, args: readonly string[],
       credential,
       channel,
       session,
-      prompt: composeRoomsAgentBriefing({ sessionId: session, displayName, channel, goal, peers }),
+      prompt: composeRoomsAgentBriefing({ sessionId: session, channel, goal, peers }),
     });
   }
   // Creation is operator-authorized, but the interactive controller belongs
@@ -717,6 +858,78 @@ export function providerResumeThreadId(provider: RoomsProvider, args: readonly s
 /** Rooms metadata comes only from Rooms flags, never opaque provider argv. */
 export function roomsLaunchPrompt(flags: ReadonlyMap<string, string>): string {
   return flags.get("prompt") ?? flags.get("goal") ?? "";
+}
+
+/**
+ * A native controlled launch gets its own throwaway session directory: there
+ * is no Rooms session id to anchor a state-dir path, and the home must never
+ * be reused because materialization is one binding, one home.
+ */
+function nativeControlledLaunch(provider: string, profilePath: string | undefined): { env: Record<string, string>; args: string[]; scrubEnv: string[] } {
+  if (!profilePath) return { env: {}, args: [], scrubEnv: [] };
+  const profile = loadCodexControlledProfileFile(profilePath);
+  const sessionDir = mkdtempSync(join(tmpdir(), "rooms-controlled-"));
+  if (provider === "codex") {
+    const launch = materializeCodexControlledHome(profile, { sessionDir, authHomeDir: profile.authHomeDir });
+    return { env: { ...launch.env }, args: [], scrubEnv: [...launch.scrubEnv] };
+  }
+  if (provider === "claude") {
+    if (!profile.authHomeDir) throw new Error("claude --controlled-profile requires authHomeDir, the durable Rooms Claude login home");
+    const launch = materializeClaudeControlledLaunch(profile, { sessionDir, authConfigDir: profile.authHomeDir });
+    return { env: { ...launch.env }, args: [...launch.args], scrubEnv: [...launch.scrubEnv] };
+  }
+  throw new Error("--controlled-profile supports the codex and claude providers only");
+}
+
+/** Resolve a persisted profile before the CLI starts its provider process. */
+function materializeSelectedCodexProfile(input: Readonly<{
+  agent: RoomsProvider;
+  channel: string;
+  sessionId: string;
+  cwd: string;
+  options: ProviderLaunchOptions;
+  translatedArgs: readonly string[];
+  executable: string;
+  stateDir: string | undefined;
+}>): { command: string[]; effectiveHome: string } {
+  if (input.agent !== "codex" || typeof input.options.profile !== "string" || !input.options.profile.trim()) {
+    throw new Error("profile is supported only for a controlled Codex launch");
+  }
+  const stateDir = resolveRoomsStateDir(input.stateDir ?? process.env.ROOMS_STATE_DIR);
+  const profile = readChannelProfileRevision(stateDir, input.options.profile);
+  if (profile.channelId !== input.channel) throw new Error("profile revision does not belong to this channel");
+  const requestedModel = input.options.model;
+  const modelSkillSet = profile.modelSkillSets.find((set) => set.provider === "codex" && (requestedModel === undefined || set.model === requestedModel));
+  if (!modelSkillSet) throw new Error("profile revision has no matching codex model skill set");
+  const effectiveHome = join(stateDir, "controlled", input.sessionId, "home");
+  const launch = materializeCodexControlledHome({
+    instructionsText: profile.instructions.text,
+    systemContext: `You are a Rooms session ${input.sessionId}.`,
+    projectInstructions: profile.projectInstructions.mode === "snapshot"
+      ? { mode: "snapshot", text: profile.projectInstructions.snapshots.map((snapshot) => snapshot.text).join("\n") }
+      : { mode: "exclude" },
+    skills: modelSkillSet.skills.map((skill) => ({ name: skill.name, snapshotPath: skill.snapshotPath, sha256: skill.rootSha256 })),
+    model: modelSkillSet.model,
+  }, { sessionDir: join(stateDir, "controlled", input.sessionId), homeDir: join(effectiveHome, ".codex"), authHomeDir: join(stateDir, "codex-auth-home"), trustedWorkingDirectory: input.cwd });
+  return {
+    effectiveHome,
+    command: ["/usr/bin/env", ...launch.scrubEnv.flatMap((name) => ["-u", name]), `CODEX_HOME=${launch.homeDir}`, input.executable, ...input.translatedArgs],
+  };
+}
+
+/** Session launches wrap the stored argv so the daemon needs no env schema. */
+function controlledProviderCommand(provider: RoomsProvider, command: string[], profilePath: string, sessionDir: string, stateDir: string): string[] {
+  if (provider === "codex") {
+    const launch = withControlledCodexHome(command, profilePath, sessionDir);
+    return ["/usr/bin/env", ...launch.home.scrubEnv.flatMap(name => ["-u", name]), ...launch.command.slice(1)];
+  }
+  if (provider === "claude") {
+    const profile = loadCodexControlledProfileFile(profilePath);
+    const authConfigDir = profile.authHomeDir ?? join(stateDir, "claude-auth-home");
+    const launch = materializeClaudeControlledLaunch(profile, { sessionDir, authConfigDir });
+    return ["/usr/bin/env", ...launch.scrubEnv.flatMap(name => ["-u", name]), `CLAUDE_CONFIG_DIR=${authConfigDir}`, ...command, ...launch.args];
+  }
+  throw new Error("--controlled-profile supports the codex and claude providers only");
 }
 
 function providerArguments(_provider: RoomsProvider, args: readonly string[], _flags: Map<string, string>): string[] {
@@ -867,6 +1080,8 @@ function usage(): string {
     "  rooms provider inspect <codex|claude|grok|gemini> [--state-dir <absolute-path>]",
     "  rooms provider register|update <codex|claude|grok|gemini> [--executable <absolute-path>] [--adapter <name>] [--enabled true|false] [--defaults-json <object>] [--state-dir <absolute-path>]",
     "  rooms provider remove <codex|claude|grok|gemini> [--state-dir <absolute-path>]",
+    "  rooms profile create --channel <channel> --name <name> --instructions <text-or-file> [--skill <installed-name>]... --model <model> [--model <model>]... [--npm-userconfig] [--browser-runtime] [--sandyboxy <sandbox>] [--credential <session>] [--state-dir <path>]",
+    "  rooms profile list --channel <channel> [--state-dir <path>]",
     "  rooms machine list [--state-dir <absolute-path>]",
     "  rooms machine route <authority-id> --ssh-host <host> [--remote-state-dir <absolute-path>] [--state-dir <absolute-path>]",
     "  rooms machine route <authority-id> --remove [--state-dir <absolute-path>]",
@@ -909,12 +1124,14 @@ function usage(): string {
     "  rooms federation capability issue --credential <token> --session <home-session> --peer-authority-id <audience> --out <path> [--mode observe|controller] [--ttl-seconds <n>] [--state-dir <path>]",
     "  rooms channel create <name> [--credential <operator-session-or-token>]",
     "  rooms channel list",
+    "  rooms channel search <query> [--limit <1-500>] [--active-only] [--messages-only] [--channel <name>]",
     "  rooms channel label <name> --label <text> [--credential <operator-session-or-token>]   (empty label clears)",
     "  rooms channel policy <name> --broadcast all|privileged [--credential <operator-session-or-token>]   (privileged: only operator and planner may broadcast)",
     "  rooms channel members <name>",
     "  rooms channel state <name>",
     "  rooms channel states --channels-json <json-array>",
     "  rooms channel send <name> --body <text> [--reply-to <event-id>]",
+    "  rooms channel lead-broadcast --credential <operator-session-or-token> --idempotency-key <key> --channels-json <json-array> --body <markdown> [--attachments-json <json-array>]",
     "  rooms channel status <name>",
     "  rooms channel suspend <name>",
     "  rooms channel archive <name> [--credential <operator-session>] [--force]",
@@ -922,9 +1139,11 @@ function usage(): string {
     "  rooms channel resume <name>",
     "  rooms channel close <name> [--credential <operator-session-or-token>]",
     "  rooms session create --credential <token> --channel <name> --name <name> --agent codex --prompt <text> [--cwd <path>]",
-    "  rooms session launch --credential <token> --channel <name> --name <name> --agent codex|claude|grok|gemini --role planner|worker|reviewer --prompt <text> [--cwd <path>] [--provider-options-json <object>] [--prompt-timeout-ms <n>] [--provider-args-json <json-array>]",
+    "  rooms session launch [--credential <token>] --channel <name> --name <name> --agent codex|claude|grok|gemini --role planner|worker|reviewer --prompt <text> [--cwd <path>] [--provider-options-json <object>] [--prompt-timeout-ms <n>] [--provider-args-json <json-array>] [--external-owner <id> --external-agent-id <id>]",
     "  rooms session register --channel <name> --name <name> [--role operator|planner|worker|reviewer] [--external-id <id>] [--delivery runtime|log]",
     "  rooms session role <session-id> --channel <name> --role planner|worker|reviewer --credential <operator-session-or-token>",
+    "  rooms session resume <session-id> --credential <operator-session-id> [--channel <name>] [--state-dir <absolute-path>]",
+    "  rooms operator-credential issue|rotate --session <operator-session-id> [--state-dir <absolute-path>]",
     "  rooms session attach <session-id> [--credential <token>] [--mode observe|controller] [--cursor <n>]",
     "  rooms session attach <remote-session-id> --ssh-host <host> --peer-authority-id <home-authority> --capability-file <path> [--mode observe|controller] [--cursor <n>]",
     "  rooms sessions attach <session-id> ...  (plural alias)",
@@ -933,9 +1152,10 @@ function usage(): string {
     "  rooms session list [--all]   (--all, --all true, or --all false)",
     "  rooms session locate <session-id> [--all] [--state-dir <absolute-path>]",
     "  rooms session send <session-id> --body <text> [--reply-to <event-id>]",
-    "  rooms session end <session-id> --credential <operator-session-or-token>",
+    "  rooms session end <session-id> [--credential <operator-or-planner-session-or-token>]",
     "  rooms message commit --sender <session> --body <text> [--channel <name>] [--target <session>] [--reply-to <event-id>]",
-    "  rooms message list --session <session> [--reply-to <event-id>] [--since <cursor>] [--limit <1-500>] [--channel <name>] [--json]",
+    "  rooms message list --session <session> | --channel <name> [--reply-to <event-id>] [--since <cursor>] [--limit <1-500>] [--json]",
+    "  rooms message search <query> [--channel <name>] [--limit <1-500>] [--messages-only]",
     "  rooms message show <event-id> [--channel <name>] [--json]",
     "  rooms message replies <event-id> [--session <session>] [--since <cursor>] [--limit <1-500>] [--channel <name>] [--json]",
     "  rooms prompt send --credential <token> --channel <name> --session <session> --prompt <text>",

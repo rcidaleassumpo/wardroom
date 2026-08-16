@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '22'
+          node-version: '22.23.2'
           package-manager-cache: false
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
@@ -79,7 +79,7 @@ jobs:
       # checks its NODE_SEA_FUSE marker before producing any artifact.
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '22'
+          node-version: '22.23.2'
           package-manager-cache: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:

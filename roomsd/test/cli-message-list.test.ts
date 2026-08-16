@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { runRoomsCLI, booleanFlag, boundedLimit, DEFAULT_MESSAGE_LIST_LIMIT } from "../src/cli/main.js";
 import { createDefaultRoomsCLIBackend } from "../src/cli/default-backend.js";
 import { createNativeComposition } from "../src/runtime/native/composition.js";
@@ -9,11 +10,13 @@ import { setupMachineIdentity } from "../src/identity/machine-identity.js";
 import { bindRoomsService } from "../src/transports/unix/index.js";
 import { roomsPaths } from "../src/provisioning/paths.js";
 import { RoomsRepository } from "../src/storage/repository.js";
+import { RuntimeRepository } from "../src/storage/runtime-repository.js";
 
 async function withTemporaryRoomsDaemon(
   prefix: string,
   seed: (store: RoomsRepository) => void,
   run: () => Promise<void>,
+  authenticatedSessionId?: string,
 ): Promise<void> {
   const stateDir = mkdtempSync(join(tmpdir(), prefix));
   const paths = roomsPaths(stateDir);
@@ -23,11 +26,17 @@ async function withTemporaryRoomsDaemon(
     daemonStorePath: process.env.ROOMSD_STORE_PATH,
     sessionId: process.env.ROOMS_SESSION_ID,
     channelId: process.env.ROOMS_CHANNEL_ID,
+    sessionProof: process.env.ROOMS_SESSION_PROOF,
   };
   setupMachineIdentity(stateDir);
   const seedStore = new RoomsRepository(paths.storePath);
   try { seed(seedStore); } finally { seedStore.close(); }
   const composition = createNativeComposition(paths.storePath, undefined, stateDir);
+  if (authenticatedSessionId) {
+    const proof = randomBytes(32);
+    new RuntimeRepository(composition.database.db).create({ runtimeId: `runtime-${authenticatedSessionId}`, homeAuthorityId: "test-authority", sessionId: authenticatedSessionId, generation: 1, protocolVersion: 1, transportKind: "localPty", machineId: "test-machine", reconnectSecret: randomBytes(32), sessionProof: proof });
+    process.env.ROOMS_SESSION_PROOF = proof.toString("base64url");
+  }
   const server = await bindRoomsService(composition.handler, { kind: "unix", path: paths.endpoint });
   try {
     process.env.ROOMS_STATE_DIR = stateDir;
@@ -40,6 +49,7 @@ async function withTemporaryRoomsDaemon(
     if (previous.daemonStorePath === undefined) delete process.env.ROOMSD_STORE_PATH; else process.env.ROOMSD_STORE_PATH = previous.daemonStorePath;
     if (previous.sessionId === undefined) delete process.env.ROOMS_SESSION_ID; else process.env.ROOMS_SESSION_ID = previous.sessionId;
     if (previous.channelId === undefined) delete process.env.ROOMS_CHANNEL_ID; else process.env.ROOMS_CHANNEL_ID = previous.channelId;
+    if (previous.sessionProof === undefined) delete process.env.ROOMS_SESSION_PROOF; else process.env.ROOMS_SESSION_PROOF = previous.sessionProof;
     await server.close();
     composition.database.close();
     rmSync(stateDir, { recursive: true, force: true });
@@ -178,6 +188,36 @@ describe("rooms message list", () => {
     );
   });
 
+  it("reads one channel without a member session and stays inside the socket limit", async () => {
+    await withTemporaryRoomsDaemon(
+      "rooms-cli-messages-channel-",
+      // Reading a channel used to demand a session id, so a caller holding only
+      // the channel had to look up a roster first.
+      (store) => seedBusyChannel(store, { bodyBytes: 3000, mine: 2, theirs: 500 }),
+      async () => {
+        const output = await runRoomsCLI(
+          ["message", "list", "--channel", "busy", "--limit", "3"],
+          createDefaultRoomsCLIBackend(),
+        );
+
+        const payload = JSON.parse(output) as { events: Array<{ body: string }>; hasMore: boolean };
+        expect(payload.events.map((event) => event.body.split(" ").at(-1))).toEqual(["theirs-499", "mine-0", "mine-1"]);
+        expect(payload.hasMore).toBe(true);
+      },
+    );
+  });
+
+  it("requires a session or a channel", async () => {
+    await withTemporaryRoomsDaemon(
+      "rooms-cli-messages-target-",
+      (store) => seedBusyChannel(store, { bodyBytes: 10, mine: 1, theirs: 0 }),
+      async () => {
+        await expect(runRoomsCLI(["message", "list"], createDefaultRoomsCLIBackend()))
+          .rejects.toThrow(/--session <session> or --channel <name>/);
+      },
+    );
+  });
+
   it("rejects an out-of-range --limit instead of returning everything", async () => {
     await withTemporaryRoomsDaemon(
       "rooms-cli-messages-limit-",
@@ -236,6 +276,7 @@ describe("Rooms structured replies", () => {
         ], backend)) as { events: Array<typeof sent.event> };
         expect(listed.events.map((event) => event.id)).toEqual([sent.event.id]);
       },
+      "sender",
     );
   });
 
@@ -269,6 +310,7 @@ describe("Rooms structured replies", () => {
           "session", "send", "recipient", "--body", "reply", "--reply-to", otherEventId,
         ], backend)).rejects.toThrow("staleReply");
       },
+      "sender",
     );
   });
 });

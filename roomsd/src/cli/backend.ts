@@ -16,9 +16,13 @@ export interface SessionCreateInput {
   cwd: string;
   prompt: string;
   command?: string[];
+  /** Rooms-owned generated provider home for a controlled profile session. */
+  effectiveHome?: string | null;
   providerThreadId?: string | null;
+  externalOwner?: string | null;
+  externalAgentId?: string | null;
 }
-export interface SessionRegisterInput { channel: string; name: string; displayName?: string | null; role: "operator" | "planner" | "worker" | "reviewer"; externalId: string | null; deliveryMode?: "runtime" | "log"; }
+export interface SessionRegisterInput { channel: string; name: string; role: "operator" | "planner" | "worker" | "reviewer"; externalId: string | null; deliveryMode?: "runtime" | "log"; }
 export interface SessionRoleInput { channel: string; sessionId: string; role: "planner" | "worker" | "reviewer"; credential: string; }
 export interface SessionListInput { includeEnded: boolean; }
 
@@ -39,10 +43,24 @@ export interface ListMessagesInput {
   replyToEventId?: string;
 }
 
+export interface SearchInput {
+  query: string;
+  channel: string | null;
+  limit: number;
+  /** Also match control payloads, such as a committed task title. */
+  includeControl: boolean;
+  /** Return one hit per matching channel, with counts, recency, and an excerpt. */
+  channelDigests: boolean;
+  /** Return the matching message events themselves. */
+  events: boolean;
+  activeOnly: boolean;
+}
+
 export interface ShowMessageInput { eventId: string; channel: string | null; }
 export interface ListRepliesInput { eventId: string; session?: string; since: string; channel: string | null; limit: number; }
 export interface ThreadLifecycleInput { eventId: string; channel: string | null; credential: string; }
 export interface ArchiveChannelInput { channel: string; credential: string; force: boolean; }
+export interface LeadBroadcastInput { credential: string; idempotencyKey: string; body: string; channelIds: string[]; attachmentReferences?: string[] }
 
 export interface SendPromptInput {
   channel: string;
@@ -51,7 +69,7 @@ export interface SendPromptInput {
   prompt: string;
 }
 
-export interface RuntimeCLIInput { credential: string; runtimeId?: string; homeAuthorityId?: string; sessionId: string; generation?: number; machineId?: string; stateDir?: string; shell?: string; command?: string[]; cwd?: string; channelId?: string; adapterKind?: string; providerThreadId?: string | null; }
+export interface RuntimeCLIInput { credential: string; runtimeId?: string; homeAuthorityId?: string; sessionId: string; generation?: number; machineId?: string; stateDir?: string; shell?: string; command?: string[]; cwd?: string; effectiveHome?: string | null; channelId?: string; adapterKind?: string; providerThreadId?: string | null; }
 export interface RuntimeAttachCLIInput { credential: string; runtimeId: string; homeAuthorityId: string; sessionId: string; generation: number; viewerId: string; mode: "observe" | "controller"; outputCursor?: string; stateDir?: string; }
 export interface RuntimeAttachOutput { cursor: string; bytes: Uint8Array }
 export interface RuntimeAttachInteractiveHandlers {
@@ -81,6 +99,7 @@ export interface RoomsCLIBackend {
   channelStateSnapshots?(channelIds: string[]): Promise<unknown>;
   usageSeries?(scope: "session" | "channel", id: string, window: string, collect: boolean): Promise<unknown>;
   channelSend?(input: { channel: string; sender: string; body: string; replyToEventId?: string }): Promise<unknown>;
+  leadBroadcast?(input: LeadBroadcastInput): Promise<unknown>;
   sessionSend?(input: { target: string; sender: string; body: string; replyToEventId?: string }): Promise<unknown>;
   commitControl?(input: CommitControlInput): Promise<unknown>;
   listControls?(input: { channel: string; sender: string; since: string; limit: number }): Promise<unknown>;
@@ -100,6 +119,7 @@ export interface RoomsCLIBackend {
   endSession?(sessionId: string, credential: string): Promise<unknown>;
   commitMessage(input: CommitMessageInput): Promise<unknown>;
   listMessages?(input: ListMessagesInput): Promise<unknown>;
+  search?(input: SearchInput): Promise<unknown>;
   showMessage?(input: ShowMessageInput): Promise<unknown>;
   listReplies?(input: ListRepliesInput): Promise<unknown>;
   threadLifecycle?(input: ThreadLifecycleInput): Promise<unknown>;

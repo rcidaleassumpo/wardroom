@@ -4,6 +4,30 @@ import { RuntimeRepository } from "../src/storage/runtime-repository.js";
 import { queryMetricsSnapshot, resetQueryMetrics } from "../src/storage/query-telemetry.js";
 
 describe("set-based channel state snapshots", () => {
+  it("persists neutral session and per-generation runtime provenance in inspect and snapshots", () => {
+    const database = new RoomsRepository(":memory:");
+    try {
+      database.insertChannel({ id: "channel-a" });
+      database.registerSession("channel-a", "worker", "worker", null, "runtime", { externalOwner: "mycelia", externalAgentId: "agent-17" });
+      const runtimes = new RuntimeRepository(database.db);
+      for (const generation of [1, 2]) runtimes.create({
+        runtimeId: `runtime-${generation}`, homeAuthorityId: "remote-authority", sessionId: "worker", generation,
+        protocolVersion: 1, transportKind: "localPty", machineId: "remote-machine", reconnectSecret: new Uint8Array(32),
+      });
+      runtimes.bind({ bindingId: "binding-2", runtimeId: "runtime-2", homeAuthorityId: "remote-authority", sessionId: "worker", generation: 2, channelId: "channel-a", adapterKind: "codex", handleRef: "remote://runtime-2", launchPolicyRef: null });
+      expect(runtimes.get("runtime-1")).toMatchObject({ externalOwner: "mycelia", externalAgentId: "agent-17", generation: 1 });
+      expect(database.inspectSession("worker")).toMatchObject({
+        session: { externalOwner: "mycelia", externalAgentId: "agent-17" },
+        runtime: { externalOwner: "mycelia", externalAgentId: "agent-17", generation: 2 },
+      });
+      expect(database.channelStateSnapshots(["channel-a"]).snapshots["channel-a"]?.members[0]).toMatchObject({
+        externalOwner: "mycelia", externalAgentId: "agent-17",
+        runtime: { externalOwner: "mycelia", externalAgentId: "agent-17", generation: 2 },
+      });
+      expect(() => database.registerSession("channel-a", "worker", "worker", null, "runtime", { externalOwner: "other", externalAgentId: "agent-17" })).toThrow("externalProvenanceAlreadyBound");
+    } finally { database.close(); }
+  });
+
   it("returns many channels and latest runtimes with one SQL statement", () => {
     const database = new RoomsRepository(":memory:");
     try {

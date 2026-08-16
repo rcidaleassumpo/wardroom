@@ -10,6 +10,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -158,6 +159,11 @@ func run(ringBytes int, shell string) {
 		fmt.Fprintln(os.Stderr, "enrollment failed: invalid_contract")
 		os.Exit(2)
 	}
+	sessionProof, err := base64.RawStdEncoding.DecodeString(e.SessionProof)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "enrollment failed: invalid_session_proof")
+		os.Exit(2)
+	}
 	if err := persistEnrollmentState(e, secret); err != nil {
 		fmt.Fprintln(os.Stderr, "enrollment state unavailable")
 		os.Exit(2)
@@ -170,6 +176,7 @@ func run(ringBytes int, shell string) {
 		payload[i] = 0
 	}
 	e.ReconnectSecret = ""
+	e.SessionProof = ""
 	enrolledRing := e.RingBytes
 	sockPath := e.SocketPath
 	if enrolledRing > 0 {
@@ -213,6 +220,7 @@ func run(ringBytes int, shell string) {
 		"SHELL=" + shell,
 		"PATH=" + providerPath,
 		"ROOMS_SESSION_ID=" + e.SessionID,
+		"ROOMS_SESSION_PROOF=" + sessionProofEnvironment(sessionProof),
 		"ROOMS_CHANNEL_ID=" + e.ChannelID,
 		"CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1",
 		"LANG=C",
@@ -324,6 +332,10 @@ func run(ringBytes int, shell string) {
 	s.closeClients()
 	child.Master.Close()
 	os.Remove(sockPath)
+}
+
+func sessionProofEnvironment(proof []byte) string {
+	return base64.RawURLEncoding.EncodeToString(proof)
 }
 
 func resolveExecutable(name, pathValue string) (string, error) {

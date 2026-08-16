@@ -14,16 +14,26 @@ export interface Runtime {
   providerThreadId: string | null;
   /** Exact canonical directory passed to the runtime host for this generation. */
   effectiveCwd: string | null;
+  /**
+   * Session generated home root, user-home-shaped: provider dot-dirs resolve
+   * directly under it (`<home>/.codex/sessions`, `<home>/.claude/projects`).
+   * Null means the ambient user home directory.
+   */
+  effectiveHome: string | null;
   generation: number;
   protocolVersion: number;
   transportKind: RuntimeTransport;
   state: RuntimeState;
   machineId: string;
   reconnectSecretHash: string;
+  /** Hash of the runtime-child possession proof; null on pre-schema-25 generations. */
+  sessionProofHash: string | null;
   createdAt: string;
   updatedAt: string;
   endedAt: string | null;
   exitReason: string | null;
+  externalOwner: string | null;
+  externalAgentId: string | null;
 }
 
 export interface RuntimeBinding {
@@ -112,8 +122,10 @@ export interface CreateRuntimeInput {
   transportKind: RuntimeTransport;
   machineId: string;
   reconnectSecret: Uint8Array;
+  sessionProof?: Uint8Array;
   providerThreadId?: string | null;
   effectiveCwd?: string | null;
+  effectiveHome?: string | null;
 }
 
 export interface RuntimeActor {

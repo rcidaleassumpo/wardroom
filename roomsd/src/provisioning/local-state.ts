@@ -5,11 +5,15 @@ import { RoomsRepository } from "../storage/repository.js";
 import { prepareCanonicalStorePath } from "../storage/store-migration.js";
 import { readMachineIdentityStatus, setupMachineIdentity, type MachineIdentityStatus } from "../identity/machine-identity.js";
 import { roomsPaths, type RoomsPaths } from "./paths.js";
+import { mintOperatorCredential, operatorCredentialPath, readOperatorCredentialSecret } from "../credentials/operator-credential.js";
 
 export type LocalRoomsStatus = MachineIdentityStatus & Readonly<{
   storePath: string;
   endpoint: string;
   operatorSessionId: string | null;
+  // Owner-only file a trusted local operator client authenticates with, instead
+  // of treating the bare operator session id as authority. Null when absent.
+  operatorCredentialReference: string | null;
   runtimeDirectory: string;
   runtimeSocketDirectory: string;
   stateMode: "0700";
@@ -26,6 +30,7 @@ export function provisionLocalState(stateDirInput?: string): LocalRoomsStatus {
   repository.close();
   secureFile(storePath, "canonical Rooms store");
   for (const sidecar of [`${storePath}-wal`, `${storePath}-shm`]) if (existsAsAny(sidecar)) secureFile(sidecar, "SQLite sidecar");
+  mintOperatorCredential(paths.stateDir, operatorSessionId);
   const identity = setupMachineIdentity(paths.stateDir);
   return status(identity, paths, storePath, operatorSessionId);
 }
@@ -56,7 +61,10 @@ export function assertLocalStateModes(paths: RoomsPaths): void {
 }
 
 function status(identity: MachineIdentityStatus, paths: RoomsPaths, storePath: string, operatorSessionId: string | null): LocalRoomsStatus {
-  return { ...identity, storePath, endpoint: paths.endpoint, operatorSessionId, runtimeDirectory: paths.runtimeDir, runtimeSocketDirectory: paths.runtimeSocketDir, stateMode: "0700", credentialMode: "0600" };
+  const operatorCredentialReference = operatorSessionId && readOperatorCredentialSecret(paths.stateDir, operatorSessionId)
+    ? operatorCredentialPath(paths.stateDir, operatorSessionId)
+    : null;
+  return { ...identity, storePath, endpoint: paths.endpoint, operatorSessionId, operatorCredentialReference, runtimeDirectory: paths.runtimeDir, runtimeSocketDirectory: paths.runtimeSocketDir, stateMode: "0700", credentialMode: "0600" };
 }
 
 function activeOperator(repository: RoomsRepository): string | null {

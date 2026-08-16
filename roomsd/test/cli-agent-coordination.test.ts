@@ -1,6 +1,10 @@
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
 import type { RoomsCLIBackend } from "../src/cli/backend.js";
 import { createSessionId, deliverLaunchPrompt, parseProviderInvocation, providerResumeThreadId, roomsLaunchPrompt, runRoomsCLI } from "../src/cli/main.js";
+import { createChannelProfileRevision } from "../src/profiles/profile-revision-store.js";
 
 function backend(overrides: Partial<RoomsCLIBackend>): RoomsCLIBackend {
   return {
@@ -122,6 +126,16 @@ describe("Rooms agent coordination commands", () => {
     expect(cleanup).toEqual(["terminate:session-worker:operator-1", "end:session-worker:operator-1"]);
   });
 
+  it("uses the current Rooms session to end a supervised worker", async () => {
+    process.env.ROOMS_SESSION_ID = "planner-1";
+    const cleanup: string[] = [];
+    await runRoomsCLI(["session", "end", "session-worker"], backend({
+      runtimeTerminateSession: async (session, credential) => { cleanup.push(`terminate:${session}:${credential}`); return {}; },
+      endSession: async (session, credential) => { cleanup.push(`end:${session}:${credential}`); return {}; },
+    }));
+    expect(cleanup).toEqual(["terminate:session-worker:planner-1", "end:session-worker:planner-1"]);
+  });
+
   it("ends a session whose runtime has already stopped", async () => {
     const cleanup: string[] = [];
     await runRoomsCLI(["session", "end", "session-worker", "--credential", "operator-1"], backend({
@@ -154,6 +168,8 @@ describe("Rooms agent coordination commands", () => {
       "--cwd", "/tmp/review-target",
       "--prompt", "review RVW-000001",
       "--provider-args-json", "[\"--yolo\"]",
+      "--external-owner", "mycelia-operator",
+      "--external-agent-id", "review-agent",
     ], backend({
       registerSession: async (input) => { calls.push({ registerSession: input }); return { membership: { sessionId: input.name } }; },
       createSession: async (input) => { calls.push({ createSession: input }); return { session: { id: input.name, role: input.role } }; },
@@ -163,7 +179,8 @@ describe("Rooms agent coordination commands", () => {
       { registerSession: { channel: "review-room", name: "operator-1", role: "operator", externalId: null } },
       { createSession: {
         credential: "operator-1", channel: "review-room", name: "session-reviewer-1", agent: "codex", adapter: "codex", role: "reviewer",
-        cwd: "/tmp/review-target", prompt: "review RVW-000001", command: ["codex", "--yolo"],
+        cwd: "/tmp/review-target", prompt: "review RVW-000001", command: ["codex", "--dangerously-bypass-hook-trust", "--yolo"],
+        externalOwner: "mycelia-operator", externalAgentId: "review-agent",
       } },
       { sendPrompt: { credential: "operator-1", channel: "review-room", session: "session-reviewer-1", prompt: "You are a Rooms session session-reviewer-1.\n\nreview RVW-000001" } },
     ]);
@@ -181,7 +198,44 @@ describe("Rooms agent coordination commands", () => {
       createSession: async (input) => { commands.push(input.command); return {}; },
       sendPrompt: async () => ({}),
     }));
-    expect(commands).toEqual([["/tmp/isolated-provider-registry/codex", "--yolo"]]);
+    expect(commands).toEqual([["/tmp/isolated-provider-registry/codex", "--dangerously-bypass-hook-trust", "--yolo"]]);
+  });
+
+  it("materializes a selected profile before createSession and keeps the caller prompt exact", async () => {
+    const stateDir = realpathSync(mkdtempSync(join(tmpdir(), "rooms-cli-profile-launch-")));
+    try {
+      mkdirSync(join(stateDir, "codex-auth-home"), { recursive: true });
+      writeFileSync(join(stateDir, "codex-auth-home", "auth.json"), "{}\n");
+      createChannelProfileRevision({
+        stateDir, id: "profile-smoke", name: "Smoke", channelId: "profile-room", version: 1,
+        createdAt: "2026-08-15T00:00:00.000Z", createdBySessionId: "operator",
+        instructions: { id: "channel", text: "PROFILE-SMOKE-77F576E: task and scope are available now.\n" },
+        projectInstructions: { mode: "exclude" },
+        modelSkillSets: [{ id: "codex-low", provider: "codex", model: "gpt-5.6-sol", catalogVersion: "test", authMode: "subscription", skills: [], allowedBuiltinTools: [], providerSpecificResolvedItems: [] }],
+      });
+      const calls: unknown[] = [];
+      let created: any;
+      await runRoomsCLI([
+        "session", "launch", "--credential", "operator", "--channel", "profile-room",
+        "--name", "profile-smoke-worker", "--agent", "codex", "--cwd", stateDir,
+        "--prompt", "CALLER_PROMPT_MUST_STAY_EXACT", "--state-dir", stateDir,
+        "--provider-options-json", '{"profile":"profile-smoke","model":"gpt-5.6-sol","reasoningEffort":"low"}',
+      ], backend({
+        providerExecutable: () => "/synthetic/codex",
+        registerSession: async () => ({}),
+        createSession: async (input) => { created = input; calls.push({ createSession: input }); return {}; },
+        sendPrompt: async (input) => { calls.push({ sendPrompt: input }); return {}; },
+      }));
+      expect(created.effectiveHome).toBe(join(stateDir, "controlled", "profile-smoke-worker", "home"));
+      expect(created.command).toContain(`CODEX_HOME=${join(stateDir, "controlled", "profile-smoke-worker", "home", ".codex")}`);
+      expect(created.command).toContain("model_reasoning_effort=low");
+      const config = readFileSync(join(created.effectiveHome, ".codex", "config.toml"), "utf8");
+      expect(config).toContain("PROFILE-SMOKE-77F576E");
+      expect(config).toContain(`[projects.${JSON.stringify(stateDir)}]\ntrust_level = "trusted"`);
+      expect(calls[1]).toEqual({ sendPrompt: { credential: "operator", channel: "profile-room", session: "profile-smoke-worker", prompt: "CALLER_PROMPT_MUST_STAY_EXACT" } });
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("passes neutral Gemini launch options through the registered agy adapter", async () => {

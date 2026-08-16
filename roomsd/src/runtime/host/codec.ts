@@ -51,6 +51,7 @@ export class HostFrameDecoder {
 export function encodeEnrollment(input: {
   sessionId: string; channelId?: string | null; runtimeId: string; homeAuthorityId: string; generation: number;
   protocolVersion: number; expiresAt: number; reconnectSecret: Uint8Array;
+  sessionProof?: Uint8Array;
   statePath: string; socketPath: string; ringBytes: number;
   command?: readonly string[]; cwd?: string;
 }): Buffer {
@@ -59,6 +60,7 @@ export function encodeEnrollment(input: {
     homeAuthorityId: input.homeAuthorityId, generation: input.generation,
     protocolVersion: input.protocolVersion, expiresAt: input.expiresAt,
     reconnectSecret: Buffer.from(input.reconnectSecret).toString("base64").replace(/=+$/g, ""),
+    ...(input.sessionProof ? { sessionProof: Buffer.from(input.sessionProof).toString("base64").replace(/=+$/g, "") } : {}),
     statePath: input.statePath, socketPath: input.socketPath, ringBytes: input.ringBytes,
     ...(input.command ? { command: input.command } : {}), ...(input.cwd ? { cwd: input.cwd } : {}),
   }), "utf8"));

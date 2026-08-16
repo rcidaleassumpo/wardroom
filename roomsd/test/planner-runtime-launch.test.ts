@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,10 +7,25 @@ import { RoomsRepository } from "../src/storage/repository.js";
 import { RuntimeRepository } from "../src/storage/runtime-repository.js";
 import { RoomsRuntimeService } from "../src/runtime/service.js";
 import { createDefaultRoomsCLIBackend } from "../src/cli/default-backend.js";
+import { sessionLaunchProvenance } from "../src/domain/session-provenance.js";
 import { setupMachineIdentity } from "../src/identity/machine-identity.js";
 import { runRoomsCLI } from "../src/cli/main.js";
 
+afterEach(() => { delete process.env.ROOMS_SESSION_ID; });
+
 describe("planner worker-runtime launch authorization", () => {
+  it("inherits the planner's external owner for launched workers", () => {
+    expect(sessionLaunchProvenance({
+      actorRole: "planner",
+      actorExternalOwner: "mycelia-operator",
+      targetSessionId: "worker-1",
+    })).toEqual({ externalOwner: "mycelia-operator", externalAgentId: "worker-1" });
+    expect(sessionLaunchProvenance({
+      actorRole: "operator",
+      actorExternalOwner: "mycelia-operator",
+      targetSessionId: "worker-1",
+    })).toEqual({ externalOwner: null, externalAgentId: null });
+  });
   it("recognizes only an active planner and worker in the same active channel", () => {
     const database = new RoomsRepository(":memory:");
     database.insertChannel({ id: "proof" });
@@ -104,10 +119,10 @@ describe("planner worker-runtime launch authorization", () => {
   });
 
   it("completes planner launch readiness and prompt delivery without rolling back", async () => {
+    process.env.ROOMS_SESSION_ID = "planner-1";
     const calls: string[] = [];
     const output = await runRoomsCLI([
       "session", "launch",
-      "--credential", "planner-1",
       "--channel", "proof",
       "--name", "session-worker-ready",
       "--agent", "claude",

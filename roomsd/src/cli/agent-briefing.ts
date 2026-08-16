@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 export interface RoomsAgentBriefingInput {
   sessionId: string;
-  displayName?: string | null;
   channel: string;
   goal?: string | null;
   peers?: readonly (string | { id: string; name?: string | null })[];
@@ -15,9 +14,7 @@ export function composeRoomsAgentBriefing(input: RoomsAgentBriefingInput): strin
     : "none";
   const goal = input.goal?.trim();
   const lines = [
-    input.displayName?.trim()
-      ? `Your mapped name is ${input.displayName.trim()} and your Rooms session ID is ${input.sessionId}. Answer to ${input.displayName.trim()}; use the session ID for routing.`
-      : `You are a Rooms session ${input.sessionId}.`,
+    `You are a Rooms session ${input.sessionId}.`,
     goal ? `You are in Rooms channel ${input.channel}, whose goal is: ${goal}.` : `You are in Rooms channel ${input.channel}.`,
     `Your launch roster is: ${peers}.`,
     "All channel members are peers.",

@@ -85,7 +85,7 @@ message EndSessionRequest { RequestContext context = 1; string session_id = 2; }
 message ReplaceSessionRequest { RequestContext context = 1; string channel_id = 2; string session_id = 3; string replacement_session_id = 4; reserved 5; string authorized_by_session_id = 6; optional string reason = 7; }
 message SendRequest { RequestContext context = 1; optional string channel_id = 2; string body = 3; MessageTarget target = 4; Correlation correlation = 5; optional string reply_to_event_id = 6; }
 message AuthenticateRequest { RequestContext context = 1; string credential = 2; }
-message IssueCredentialRequest { RequestContext context = 1; string session_id = 2; }
+message IssueCredentialRequest { RequestContext context = 1; string session_id = 2; string proof = 3; }
 message GetSessionsRequest { RequestContext context = 1; }
 message GetRosterRequest { RequestContext context = 1; string channel_id = 2; }
 message GetMembershipHistoryRequest { RequestContext context = 1; string channel_id = 2; }
@@ -93,7 +93,7 @@ message GetSnapshotRequest { RequestContext context = 1; string channel_id = 2; 
 message GetEventsRequest { RequestContext context = 1; optional string channel_id = 2; optional string after_cursor = 3; optional string after_event_id = 4; optional string session_id = 5; optional uint32 limit = 6; optional string event_id = 7; optional string reply_to_event_id = 8; }
 message GetThreadLifecycleRequest { RequestContext context = 1; string thread_root_event_id = 2; optional string channel_id = 3; }
 message ThreadLifecycleMutationRequest { RequestContext context = 1; string thread_root_event_id = 2; optional string channel_id = 3; }
-message SearchRequest { RequestContext context = 1; string query = 2; SearchScopeKind scope = 3; optional string channel_id = 4; uint32 limit = 5; }
+message SearchRequest { RequestContext context = 1; string query = 2; SearchScopeKind scope = 3; optional string channel_id = 4; uint32 limit = 5; optional bool include_control = 6; optional bool include_channel_digests = 7; optional bool active_only = 8; optional bool include_events = 9; }
 message GetRecipientsRequest { RequestContext context = 1; string event_id = 2; }
 message WatchRequest { RequestContext context = 1; string channel_id = 2; optional string after_cursor = 3; optional string acknowledged_cursor = 4; }
 message StatusRequest { RequestContext context = 1; }
@@ -117,7 +117,8 @@ message SnapshotResponse { Snapshot snapshot = 1; }
 message EventsResponse { repeated Message events = 1; optional string cursor = 2; optional string oldest_cursor = 3; bool has_more = 4; }
 message ThreadLifecycle { string thread_root_event_id = 1; string channel_id = 2; ThreadLifecycleState state = 3; optional google.protobuf.Timestamp resolved_at = 4; optional string resolved_by_session_id = 5; optional google.protobuf.Timestamp reopened_at = 6; optional string reopened_by_session_id = 7; optional google.protobuf.Timestamp updated_at = 8; }
 message ThreadLifecycleResponse { ThreadLifecycle thread = 1; optional string cursor = 2; }
-message SearchResponse { repeated Message events = 1; }
+message ChannelSearchHit { string channel_id = 1; optional string label = 2; ChannelLifecycleState lifecycle_state = 3; uint32 message_matches = 4; uint32 control_matches = 5; repeated string matched_in = 6; optional google.protobuf.Timestamp last_match_at = 7; optional google.protobuf.Timestamp last_activity_at = 8; optional string excerpt = 9; }
+message SearchResponse { repeated Message events = 1; repeated ChannelSearchHit channels = 2; }
 message RecipientsResponse { repeated Recipient recipients = 1; }
 message StatusResponse { LifecycleStatus status = 1; }
 message MemberSuspendResult { string session_id = 1; bool ok = 2; optional string detail = 3; }

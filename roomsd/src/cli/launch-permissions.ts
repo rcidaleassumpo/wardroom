@@ -14,7 +14,7 @@ export type LaunchPermissionMode = typeof LAUNCH_PERMISSION_MODES[number];
  * Rooms therefore owns the headless default and each provider's way of saying
  * "do not ask":
  *   claude  --dangerously-skip-permissions
- *   codex   --yolo
+ *   codex   --yolo --dangerously-bypass-hook-trust
  *   grok    --permission-mode bypassPermissions
  *
  * The claude and codex forms are the ones already proven on this machine by the
@@ -57,6 +57,9 @@ export function argsAlreadySetPermissions(provider: RoomsProvider, args: readonl
  */
 export function launchPermissionArguments(provider: RoomsProvider, args: readonly string[], mode: LaunchPermissionMode): string[] {
   if (mode === "manual") return [];
-  if (argsAlreadySetPermissions(provider, args)) return [];
-  return [...HEADLESS_ARGUMENTS[provider]];
+  const required = provider === "codex" && !args.includes("--dangerously-bypass-hook-trust")
+    ? ["--dangerously-bypass-hook-trust"]
+    : [];
+  if (argsAlreadySetPermissions(provider, args)) return required;
+  return [...HEADLESS_ARGUMENTS[provider], ...required];
 }

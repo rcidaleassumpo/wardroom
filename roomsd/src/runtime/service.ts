@@ -2,6 +2,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { closeSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
@@ -18,6 +19,9 @@ import type { RuntimeAction, RuntimeAttachment, RuntimeBinding, RuntimeEvent, Ru
 import { RuntimeRepository } from "../storage/runtime-repository.js";
 import { RoomsStoreError } from "../storage/repository.js";
 import { readMachineIdentityStatus } from "../identity/machine-identity.js";
+
+/** Exit reason for a runtime whose host process is no longer reachable. */
+export const HOST_ABSENT_REASON = "runtime host is absent";
 
 /**
  * A provider submission must not place text and Enter in the same PTY write.
@@ -365,7 +369,47 @@ export class RoomsRuntimeService {
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 });
   }
 
+  /**
+   * A localPty host is a separate process, so it can die while this daemon is
+   * down: a daemon restart, an upgrade, or a machine restart leaves the row
+   * saying "running" with nothing behind the socket. Nothing else ever
+   * corrects that: exit frames need a live connection, so no client is left to
+   * hear the exit. The stale row then keeps a session undeliverable forever —
+   * it holds the delivery lookup, the active-runtime quota, and the provider
+   * thread, and it makes `session resume` answer "already running".
+   *
+   * Probe each locally bound host once at startup and record the ones that are
+   * gone. Only a refused or missing socket counts as absent: a host that is
+   * merely slow to accept still owns its generation.
+   *
+   * Locality is the home authority, not `machineId`: `machineId` is the
+   * hostname, which changes with the network the machine joins, so rows
+   * written under an earlier hostname would never be examined again.
+   */
+  async reconcileLocalRuntimeHosts(): Promise<{ checked: number; crashed: readonly string[] }> {
+    const live = this.repository.list()
+      .filter((runtime) => !runtime.endedAt
+        && runtime.homeAuthorityId === this.options.defaultHomeAuthorityId
+        && runtime.transportKind === "localPty"
+        && ["creating", "running", "recovering"].includes(runtime.state));
+    const crashed: string[] = [];
+    for (const runtime of live) {
+      const endpoint = this.repository.getBinding(runtime.runtimeId)?.handleRef;
+      const socketPath = (endpoint ? parseRuntimeHandle(endpoint)?.socketPath : null) ?? runtimeSocketPath(runtime, this.options.socketDirectory);
+      if (!(await runtimeHostIsAbsent(socketPath))) continue;
+      const supervisor = this.supervisors.get(runtime.runtimeId) ?? this.rehydrateSupervisor(runtime);
+      this.repository.markState(runtime.runtimeId, runtime.generation, "crashed", HOST_ABSENT_REASON);
+      await supervisor.cleanup();
+      crashed.push(runtime.runtimeId);
+    }
+    return { checked: live.length, crashed };
+  }
+
   quotaStatuses(machineId?: string): RuntimeQuotaStatus[] { return this.repository.quotaStatuses(machineId); }
+
+  provesSessionPossession(sessionId: string, proof: Uint8Array): boolean {
+    return this.repository.provesActiveSession(sessionId, proof);
+  }
 
   setActiveRuntimeQuota(machineId: string, limit: number, actor: RuntimeActor): RuntimeQuotaStatus {
     if (actor.role !== "operator") throw new RoomsStoreError("runtimeUnauthorized");
@@ -391,11 +435,12 @@ export class RoomsRuntimeService {
     const generation = request.generation ?? 1;
     const launchCwd = canonicalProviderCwd(request.cwd);
     const reconnectSecret = randomBytes(32);
-    const runtime = this.repository.create({ runtimeId, homeAuthorityId: request.homeAuthorityId || this.options.defaultHomeAuthorityId, sessionId: request.sessionId, generation, protocolVersion: request.protocolVersion ?? 1, transportKind: (request.transportKind ?? "localPty") as "localPty" | "structured", machineId: request.machineId ?? this.options.machineId, providerThreadId: request.providerThreadId ?? null, effectiveCwd: launchCwd ?? null, reconnectSecret });
+    const sessionProof = randomBytes(32);
+    const runtime = this.repository.create({ runtimeId, homeAuthorityId: request.homeAuthorityId || this.options.defaultHomeAuthorityId, sessionId: request.sessionId, generation, protocolVersion: request.protocolVersion ?? 1, transportKind: (request.transportKind ?? "localPty") as "localPty" | "structured", machineId: request.machineId ?? this.options.machineId, providerThreadId: request.providerThreadId ?? null, effectiveCwd: launchCwd ?? null, effectiveHome: request.effectiveHome ?? null, reconnectSecret, sessionProof });
     const stateDir = request.stateDir ?? this.options.stateDir;
     ensureRuntimeSocketDirectory(this.options.socketDirectory);
     const socketPath = runtimeSocketPath(runtime, this.options.socketDirectory);
-    const supervisor = new RuntimeHostSupervisor({ sessionId: runtime.sessionId, channelId: request.channelId, runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, generation: runtime.generation, stateDir, socketPath, executable: this.options.hostExecutable || undefined, shell: request.shell, command: request.command, cwd: launchCwd, secret: reconnectSecret, capabilityRenewal: true });
+    const supervisor = new RuntimeHostSupervisor({ sessionId: runtime.sessionId, channelId: request.channelId, runtimeId: runtime.runtimeId, homeAuthorityId: runtime.homeAuthorityId, generation: runtime.generation, stateDir, socketPath, executable: this.options.hostExecutable || undefined, shell: request.shell, command: request.command, cwd: launchCwd, secret: reconnectSecret, sessionProof, capabilityRenewal: true });
     this.supervisors.set(runtimeId, supervisor);
     try {
       const launchedAt = Date.now();
@@ -411,7 +456,7 @@ export class RoomsRuntimeService {
         // runtime/session identity for later native `--resume` recovery.
         // Claim is atomic inside tryClaimProviderThreadId so two concurrent
         // same-cwd launches cannot both bind the newest unclaimed session.
-        void discoverProviderThreadId(request.adapterKind, launchCwd, launchedAt, undefined, {
+        void discoverProviderThreadId(request.adapterKind, launchCwd, launchedAt, request.effectiveHome ?? undefined, {
           timeoutMs: PROVIDER_IDENTITY_TIMEOUT_MS,
           // Bind to this launch's Rooms session id once the briefing lands in
           // the provider transcript, so concurrent same-cwd launches cannot
@@ -553,7 +598,7 @@ export class RoomsRuntimeService {
       this.repository.detach(attachment.attachmentId);
       if (isAbsentRuntimeHost(error)) {
         const supervisor = this.supervisors.get(runtime.runtimeId) ?? this.rehydrateSupervisor(runtime);
-        this.repository.markState(runtime.runtimeId, runtime.generation, "crashed", "runtime host is absent");
+        this.repository.markState(runtime.runtimeId, runtime.generation, "crashed", HOST_ABSENT_REASON);
         await supervisor.cleanup();
       }
       throw error;
@@ -666,7 +711,18 @@ export class RoomsRuntimeService {
     const deliveryKey = `delivery:${runtime.runtimeId}`;
     let client = this.clients.get(deliveryKey);
     if (!client) {
-      client = await supervisor.reconnect("observe", ["observe", "deliverMessage"], 0n);
+      // A send is the most common way to meet a host that is no longer there.
+      // Attach already records that absence; delivery used to swallow it, so
+      // the row kept claiming "running" and every later send, presence read,
+      // and `session resume` believed a runtime that could never answer.
+      try { client = await supervisor.reconnect("observe", ["observe", "deliverMessage"], 0n); }
+      catch (error) {
+        if (isAbsentRuntimeHost(error)) {
+          this.repository.markState(runtime.runtimeId, runtime.generation, "crashed", HOST_ABSENT_REASON);
+          await supervisor.cleanup();
+        }
+        throw error;
+      }
       this.clients.set(deliveryKey, client);
       client.on("exit", (exit) => { this.repository.markState(runtime.runtimeId, runtime.generation, "exited", `exit:${exit.code}`); });
       client.on("error", () => {});
@@ -755,4 +811,19 @@ export class RoomsRuntimeService {
 function isAbsentRuntimeHost(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException)?.code;
   return code === "ENOENT" || code === "ECONNREFUSED" || (error instanceof Error && /connect (?:ENOENT|ECONNREFUSED)/.test(error.message));
+}
+
+/**
+ * Answer only what the kernel already knows about the endpoint. The probe
+ * opens and drops a connection without speaking the host protocol, so it
+ * cannot disturb a host that is serving another viewer.
+ */
+function runtimeHostIsAbsent(socketPath: string, timeoutMs = 2_000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = connect(socketPath);
+    const settle = (absent: boolean) => { probe.removeAllListeners(); probe.destroy(); resolve(absent); };
+    probe.setTimeout(timeoutMs, () => settle(false));
+    probe.once("connect", () => settle(false));
+    probe.once("error", (error) => settle(isAbsentRuntimeHost(error)));
+  });
 }

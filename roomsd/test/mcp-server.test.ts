@@ -55,6 +55,23 @@ describe("Rooms MCP server", () => {
     });
   });
 
+  it("searches channels for an agent that only remembers what was discussed", async () => {
+    const backend = createBackend();
+    const { client } = await connect(backend, { ROOMS_SESSION_ID: "mcp-sender" });
+
+    await client.callTool({ name: "search", arguments: { query: "4102" } });
+
+    expect(backend.search).toHaveBeenCalledWith({
+      query: "4102",
+      channel: null,
+      limit: 20,
+      channelDigests: true,
+      events: true,
+      includeControl: true,
+      activeOnly: false,
+    });
+  });
+
   it("fails closed when send has no exact destination or session identity", async () => {
     const { client } = await connect(createBackend(), {});
 
@@ -102,6 +119,7 @@ function createBackend(): RoomsCLIBackend {
     registerSession: vi.fn(async () => ({ session: { id: "mcp-worker" } })),
     commitMessage: vi.fn(async () => ({ event: { id: "event-1" }, cursor: "1" })),
     listMessages: vi.fn(async () => ({ events: [], cursor: "12" })),
+    search: vi.fn(async () => ({ events: [], channels: [] })),
     sendPrompt: vi.fn(async () => ({})),
   };
 }
