@@ -11,6 +11,7 @@ import type { AttachmentMode, RuntimeAction } from "../runtime/contracts.js";
 
 type Row = Record<string, unknown>;
 const now = () => new Date().toISOString();
+const DEFAULT_MAX_ACTIVE_RUNTIMES = 1_000_000;
 const text = (value: unknown): string => String(value);
 const optionalText = (value: unknown): string | null => value == null ? null : String(value);
 const hash = (value: Uint8Array): string => createHash("sha256").update(value).digest("hex");
@@ -310,7 +311,7 @@ export class RuntimeRepository {
 
   quota(machineId: string): RuntimeQuota {
     const row = this.one("SELECT * FROM runtime_quotas WHERE machine_id=?", machineId);
-    return row ? toQuota(row) : { machineId, maxActiveRuntimes: 32, maxObserversPerRuntime: 32, updatedAt: now() };
+    return row ? toQuota(row) : { machineId, maxActiveRuntimes: DEFAULT_MAX_ACTIVE_RUNTIMES, maxObserversPerRuntime: 32, updatedAt: now() };
   }
 
   quotaStatuses(machineId?: string): RuntimeQuotaStatus[] {

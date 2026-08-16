@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "3514cbed16b7b346b2a85d334f5dd2022cd36596",
+  "sourceCommit": "f4b86622d75bc539e9f7c340a5909db9cc19ca9a",
   "files": [
     {
       "path": ".github/ISSUE_TEMPLATE/1-bug-report.yml",
@@ -1048,9 +1048,9 @@
     },
     {
       "path": "roomsd/src/storage/runtime-repository.ts",
-      "sha256": "961996b18dcc602c911799749b2d25aa3fb5194921bd1016760d988a04852110",
+      "sha256": "870c9a8777d6044b829dce1e69a3bc8be8b7b523200965f3b6af071e1f0b1905",
       "mode": "0644",
-      "bytes": 28020
+      "bytes": 28092
     },
     {
       "path": "roomsd/src/storage/store-migration.ts",
@@ -1210,9 +1210,9 @@
     },
     {
       "path": "roomsd/test/cli-runtime-quota.test.ts",
-      "sha256": "3fec2e17644b3e31e6fab73635248a966873c507a339078fd92394f822ef7c93",
+      "sha256": "02c557772d5c3b5537837102bcb5457ca8fb2c340c85697cfd5ccf87306067d4",
       "mode": "0644",
-      "bytes": 4805
+      "bytes": 4812
     },
     {
       "path": "roomsd/test/cli-session-inspect.test.ts",
@@ -1606,9 +1606,9 @@
     },
     {
       "path": "roomsd/test/runtime/native-runtime.test.ts",
-      "sha256": "d83f0773462b33f5939cd4e780068d5073377421285022a90e1d661d777989ba",
+      "sha256": "860627cf4683d9c635093ae71ce64831def2e1ca40e04af05ffba2d9fa33fef0",
       "mode": "0644",
-      "bytes": 35601
+      "bytes": 35622
     },
     {
       "path": "roomsd/test/schema-safety.test.ts",

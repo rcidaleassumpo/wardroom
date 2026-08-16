@@ -158,12 +158,12 @@ describe("native Rooms runtime", () => {
       const workerConnection = { authenticatedSessionId: "worker", credentials: new Map([["worker-credential", "worker"]]), onClose: new Set() };
 
       const initial = await composition.handler.runtimeQuotaGet!({ machineId: "quota-machine" });
-      expect(initial.quotas).toMatchObject([{ machineId: "quota-machine", source: "default", maxActiveRuntimes: 32, activeRuntimes: 0, availableRuntimes: 32 }]);
+      expect(initial.quotas).toMatchObject([{ machineId: "quota-machine", source: "default", maxActiveRuntimes: 1_000_000, activeRuntimes: 0, availableRuntimes: 1_000_000 }]);
       await expect(composition.handler.runtimeQuotaSet!({ machineId: "quota-machine", limit: 48, context: { credential: "worker-credential" }, __connection: workerConnection } as never)).rejects.toMatchObject({ code: "runtimeUnauthorized" });
       const changed = await composition.handler.runtimeQuotaSet!({ machineId: "quota-machine", limit: 48, context: { credential: "operator-credential" }, __connection: operatorConnection } as never);
       expect(changed.quota).toMatchObject({ machineId: "quota-machine", source: "override", maxActiveRuntimes: 48, activeRuntimes: 0, availableRuntimes: 48 });
       const reset = await composition.handler.runtimeQuotaReset!({ machineId: "quota-machine", context: { credential: "operator-credential" }, __connection: operatorConnection } as never);
-      expect(reset.quota).toMatchObject({ machineId: "quota-machine", source: "default", maxActiveRuntimes: 32 });
+      expect(reset.quota).toMatchObject({ machineId: "quota-machine", source: "default", maxActiveRuntimes: 1_000_000 });
       composition.database.close();
     } finally {
       rmSync(stateDir, { recursive: true, force: true });

@@ -56,7 +56,7 @@ describe("rooms runtime quota", () => {
       const shown = JSON.parse(await runRoomsCLI(["runtime", "quota", "--machine", "work-mac"], subject));
       expect(shown.quotas).toMatchObject([{ machineId: "work-mac", maxActiveRuntimes: 64, source: "override" }]);
       const reset = JSON.parse(await runRoomsCLI(["runtime", "quota", "reset", "--machine", "work-mac", "--credential", "operator"], subject));
-      expect(reset.quota).toMatchObject({ machineId: "work-mac", maxActiveRuntimes: 32, source: "default" });
+      expect(reset.quota).toMatchObject({ machineId: "work-mac", maxActiveRuntimes: 1_000_000, source: "default" });
     } finally {
       if (previous.stateDir === undefined) delete process.env.ROOMS_STATE_DIR; else process.env.ROOMS_STATE_DIR = previous.stateDir;
       if (previous.sessionProof === undefined) delete process.env.ROOMS_SESSION_PROOF; else process.env.ROOMS_SESSION_PROOF = previous.sessionProof;
