@@ -214,10 +214,6 @@ func run(ringBytes int, shell string) {
 	env := []string{
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
-		"TERM_PROGRAM=Mycelia",
-		"CLICOLOR=1",
-		"CLICOLOR_FORCE=1",
-		"FORCE_COLOR=1",
 		"HOME=" + os.Getenv("HOME"),
 		"USER=" + os.Getenv("USER"),
 		"LOGNAME=" + os.Getenv("LOGNAME"),

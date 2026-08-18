@@ -91,11 +91,6 @@ export class RuntimeHostSupervisor extends EventEmitter {
       env: {
         ...process.env,
         TERM: "xterm-256color",
-        COLORTERM: "truecolor",
-        TERM_PROGRAM: "Mycelia",
-        CLICOLOR: "1",
-        CLICOLOR_FORCE: "1",
-        FORCE_COLOR: "1",
       },
       detached: true,
       stdio: ["ignore", "ignore", "pipe", "pipe"],
